@@ -93,8 +93,22 @@ struct UsageChartCard: View {
         }
     }
 
+    private func projectionEndValue(filtered: [UsageReading], start: Date, end: Date) -> Double? {
+        guard let last = filtered.last, end > last.timestamp else { return nil }
+        let lastValue = range == .sevenDay ? last.weekly : last.fiveHour
+        let elapsed = last.timestamp.timeIntervalSince(start)
+        guard elapsed > range.duration * 0.05 else { return nil }
+        let remaining = end.timeIntervalSince(last.timestamp)
+        return lastValue + (lastValue / elapsed) * remaining
+    }
+
     private func chartView(filtered: [UsageReading], start: Date, end: Date) -> some View {
         let color = barColor
+        let projEnd = projectionEndValue(filtered: filtered, start: start, end: end)
+        let projColor: Color = if let projEnd {
+            projEnd >= 80 ? .widgetRed : projEnd >= 60 ? .widgetYellow : .white
+        } else { .white }
+
         return Chart {
             ForEach(Array(filtered.enumerated()), id: \.offset) { _, reading in
                 let value = range == .sevenDay ? reading.weekly : reading.fiveHour
@@ -114,13 +128,35 @@ struct UsageChartCard: View {
 
                 LineMark(
                     x: .value("Time", reading.timestamp),
-                    y: .value("Usage", value)
+                    y: .value("Usage", value),
+                    series: .value("S", "actual")
                 )
                 .foregroundStyle(color.opacity(0.8))
                 .lineStyle(StrokeStyle(lineWidth: 1.5))
                 .interpolationMethod(.catmullRom)
             }
+
+            if let projEnd, let last = filtered.last {
+                let lastValue = range == .sevenDay ? last.weekly : last.fiveHour
+
+                LineMark(
+                    x: .value("Time", last.timestamp),
+                    y: .value("Usage", lastValue),
+                    series: .value("S", "proj")
+                )
+                .foregroundStyle(projColor.opacity(0.6))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+
+                LineMark(
+                    x: .value("Time", end),
+                    y: .value("Usage", min(projEnd, 100)),
+                    series: .value("S", "proj")
+                )
+                .foregroundStyle(projColor.opacity(0.6))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            }
         }
+        .chartLegend(.hidden)
         .chartXScale(domain: start...end)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 6)) { value in

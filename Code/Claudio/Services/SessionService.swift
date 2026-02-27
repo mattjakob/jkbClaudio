@@ -23,9 +23,11 @@ actor SessionService {
     func getActiveSessions() -> [SessionEntry] {
         let processInfos = getClaudeProcessInfos()
         var results: [SessionEntry] = []
+        var usedSessionPaths: Set<String> = []
 
         for info in processInfos {
-            if var session = findSessionForPath(info.path) {
+            if var session = findSessionForPath(info.path, excluding: usedSessionPaths) {
+                if !session.fullPath.isEmpty { usedSessionPaths.insert(session.fullPath) }
                 enrichSession(&session)
                 session.elapsedSeconds = info.elapsedSeconds
                 session.memoryMB = info.memoryMB
@@ -49,7 +51,7 @@ actor SessionService {
         return results.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
     }
 
-    private func findSessionForPath(_ projectPath: String) -> SessionEntry? {
+    private func findSessionForPath(_ projectPath: String, excluding usedPaths: Set<String> = []) -> SessionEntry? {
         let fm = FileManager.default
         let dirName = projectPath.replacingOccurrences(of: "/", with: "-")
         let candidates = [dirName] + parentDirNames(dirName)
@@ -60,7 +62,9 @@ actor SessionService {
             let indexPath = "\(dirPath)/sessions-index.json"
             if let data = fm.contents(atPath: indexPath),
                let index = try? JSONDecoder().decode(SessionsIndex.self, from: data),
-               let latest = index.entries.sorted(by: { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }).first {
+               let latest = index.entries
+                .filter({ !usedPaths.contains($0.fullPath) })
+                .sorted(by: { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }).first {
                 return latest
             }
 
@@ -72,6 +76,7 @@ actor SessionService {
 
             for file in jsonlFiles {
                 let filePath = "\(dirPath)/\(file)"
+                if usedPaths.contains(filePath) { continue }
                 guard let attrs = try? fm.attributesOfItem(atPath: filePath),
                       let mtime = attrs[.modificationDate] as? Date else { continue }
                 if mtime > latestMtime {
