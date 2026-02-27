@@ -41,6 +41,12 @@ final class KeychainService: Sendable {
             defer { lock.unlock() }
             credentials = creds
         }
+
+        func clear() {
+            lock.lock()
+            defer { lock.unlock() }
+            credentials = nil
+        }
     }
 
     func getCredentials() throws -> OAuthCredentials {
@@ -98,6 +104,13 @@ final class KeychainService: Sendable {
 
     func getRefreshToken() throws -> String {
         try getCredentials().claudeAiOauth.refreshToken
+    }
+
+    /// Clears cached/mirror credentials and re-reads from the Keychain.
+    func reloadFromKeychain() throws -> OAuthCredentials {
+        cache.clear()
+        try? FileManager.default.removeItem(atPath: Self.mirrorPath)
+        return try getCredentials()
     }
 
     // MARK: - Private

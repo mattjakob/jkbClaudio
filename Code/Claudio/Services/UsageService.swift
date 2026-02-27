@@ -51,6 +51,10 @@ actor UsageService {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            // Refresh token is stale — try reloading fresh credentials from Keychain
+            if let fresh = try? KeychainService.shared.reloadFromKeychain() {
+                return fresh.claudeAiOauth.accessToken
+            }
             throw URLError(.userAuthenticationRequired)
         }
 
