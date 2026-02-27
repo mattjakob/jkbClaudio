@@ -8,7 +8,7 @@ let package = Package(
         .executableTarget(
             name: "ClaudeWidget",
             path: "ClaudeWidget",
-            exclude: ["Info.plist"]
+            exclude: ["Info.plist", "ClaudeWidget.entitlements"]
         )
     ]
 )
