@@ -30,6 +30,9 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     var memoryMB: Double = 0
     var cpuPercent: Double = 0
 
+    // Actual filesystem mtime (set during enrichment, ms since epoch)
+    var actualFileMtime: Int64 = 0
+
     var id: String { sessionId }
 
     var createdDate: Date? {
@@ -40,6 +43,14 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     var modifiedDate: Date? {
         ISO8601DateFormatter.withFractionalSeconds.date(from: modified)
             ?? ISO8601DateFormatter.standard.date(from: modified)
+    }
+
+    /// Best available last-activity date: actual filesystem mtime if available, else index modified
+    var lastActivityDate: Date? {
+        if actualFileMtime > 0 {
+            return Date(timeIntervalSince1970: Double(actualFileMtime) / 1000)
+        }
+        return modifiedDate
     }
 
     var projectName: String {

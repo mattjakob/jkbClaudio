@@ -4,15 +4,34 @@ struct SessionRow: View {
     let session: SessionEntry
     let isActive: Bool
 
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f
-    }()
+    private var isWorking: Bool {
+        guard isActive, let lastActivity = session.lastActivityDate else { return false }
+        return Date().timeIntervalSince(lastActivity) < 120
+    }
 
-    private var timeAgo: String {
-        guard let modified = session.modifiedDate else { return "" }
-        return Self.relativeFormatter.localizedString(for: modified, relativeTo: .now)
+    private var statusText: String {
+        let lastActivity = session.lastActivityDate
+
+        if isActive {
+            // Check if session file was written to recently (actively working)
+            if let lastActivity {
+                let sinceLastWrite = Date().timeIntervalSince(lastActivity)
+                if sinceLastWrite < 120 {
+                    if session.totalDurationMs > 0 {
+                        return "\(formatDurationMs(session.totalDurationMs)) thinking"
+                    }
+                    return "active"
+                }
+                // Process running but file hasn't been written to → waiting for input
+                return "\(formatDuration(max(Int(sinceLastWrite), 60))) idle"
+            }
+            return "\(formatDuration(session.elapsedSeconds)) active"
+        }
+
+        // No running process
+        guard let lastActivity else { return "" }
+        let idle = Int(Date().timeIntervalSince(lastActivity))
+        return "\(formatDuration(max(idle, 60))) idle"
     }
 
     private var modelShort: String? {
@@ -74,16 +93,16 @@ struct SessionRow: View {
                 Text(session.projectName)
                     .font(.callout)
                     .fontWeight(.medium)
-                    .foregroundStyle(isActive ? Color.widgetActive : .secondary)
+                    .foregroundStyle(isWorking ? Color.widgetActive : .secondary)
                 Spacer()
-                Text(timeAgo)
+                Text(statusText)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
 
             HStack(spacing: 8) {
                 if let model = modelShort {
-                    Label(model, systemImage: "terminal")
+                    Label(model, systemImage: "apple.terminal")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -105,12 +124,7 @@ struct SessionRow: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
-                    Label("1 agent", systemImage: "sparkles")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                if session.totalDurationMs > 0 {
-                    Text("(\(formatDurationMs(session.totalDurationMs)) thinking)")
+                    Label("single agent", systemImage: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -154,7 +168,7 @@ struct SessionCard: View {
                 ForEach(displayed.indices, id: \.self) { i in
                     SessionRow(
                         session: displayed[i],
-                        isActive: displayed[i].elapsedSeconds > 0 && displayed[i].cpuPercent > 0.5
+                        isActive: displayed[i].elapsedSeconds > 0
                     )
                     if i < displayed.count - 1 {
                         Divider().opacity(0.3)

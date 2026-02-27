@@ -110,8 +110,15 @@ actor SessionService {
     }
 
     private func enrichSession(_ session: inout SessionEntry) {
+        let fm = FileManager.default
         guard !session.fullPath.isEmpty,
-              let data = FileManager.default.contents(atPath: session.fullPath) else { return }
+              let data = fm.contents(atPath: session.fullPath) else { return }
+
+        // Get actual filesystem mtime (ground truth for last activity)
+        if let attrs = try? fm.attributesOfItem(atPath: session.fullPath),
+           let mtime = attrs[.modificationDate] as? Date {
+            session.actualFileMtime = Int64(mtime.timeIntervalSince1970 * 1000)
+        }
 
         let lines = data.split(separator: UInt8(ascii: "\n"))
         var userMsgs = 0
@@ -141,6 +148,14 @@ actor SessionService {
                 userMsgs += 1
                 if permissionMode == nil, let pm = obj["permissionMode"] as? String {
                     permissionMode = pm
+                }
+                // Capture durationMs from tool use results
+                if let result = obj["toolUseResult"] as? [String: Any] {
+                    if let dur = result["durationMs"] as? Int64 {
+                        totalDurationMs += dur
+                    } else if let dur = result["durationMs"] as? Int {
+                        totalDurationMs += Int64(dur)
+                    }
                 }
                 if let msg = obj["message"] as? [String: Any] {
                     if firstPrompt == nil, let content = msg["content"] as? String {

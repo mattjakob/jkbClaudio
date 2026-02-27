@@ -28,6 +28,22 @@ struct UsageChartCard: View {
     let fiveHourResetsAt: Date?
     @Binding var range: ChartRange
 
+    private var altLabel: String {
+        range == .sevenDay ? "5-Hour" : "Weekly"
+    }
+
+    private var altUtilization: Double {
+        range == .sevenDay ? fiveHourUtilization : weeklyUtilization
+    }
+
+    private var altResetsAt: Date? {
+        range == .sevenDay ? fiveHourResetsAt : weeklyResetsAt
+    }
+
+    private var altPeriodSeconds: TimeInterval {
+        range == .sevenDay ? 5 * 3600 : 7 * 86400
+    }
+
     private var currentUtilization: Double {
         range == .sevenDay ? weeklyUtilization : fiveHourUtilization
     }
@@ -76,8 +92,17 @@ struct UsageChartCard: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+
+            UsageBar(
+                label: altLabel,
+                utilization: altUtilization,
+                resetsAt: altResetsAt,
+                periodSeconds: altPeriodSeconds
+            )
+            .padding(.top, 4)
         }
         .padding(14)
+        .contentShape(Rectangle())
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.2)) {
@@ -168,15 +193,22 @@ struct UsageChartCard: View {
         .chartLegend(.hidden)
         .chartXScale(domain: start...end)
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 6)) { value in
-                AxisValueLabel {
-                    if let date = value.as(Date.self) {
-                        if range == .sevenDay {
-                            Text(date, format: .dateTime.weekday(.abbreviated))
+            if range == .fiveHour {
+                let ticks = stride(from: start, through: end, by: 3600).map { $0 }
+                AxisMarks(values: ticks) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.hour())
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
-                        } else {
-                            Text(date, format: .dateTime.hour())
+                        }
+                    }
+                }
+            } else {
+                AxisMarks(values: .automatic(desiredCount: 7)) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) {
+                            Text(date, format: .dateTime.weekday(.abbreviated))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.tertiary)
                         }
