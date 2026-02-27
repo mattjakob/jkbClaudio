@@ -19,7 +19,10 @@ final class KeychainService: Sendable {
     static let shared = KeychainService()
 
     private static let sourceService = "Claude Code-credentials"
-    private static let mirrorService = "com.mattjakob.ClaudeWidget.credentials"
+    private static let mirrorPath: String = {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return "\(home)/.claude/widget-credentials.json"
+    }()
 
     private let cache = ManagedCache()
 
@@ -45,23 +48,36 @@ final class KeychainService: Sendable {
             return cached
         }
 
-        // Try our own mirror first (no prompt)
-        if let data = readItem(service: Self.mirrorService) {
-            if let creds = try? JSONDecoder().decode(OAuthCredentials.self, from: data) {
-                cache.set(creds)
-                return creds
-            }
+        // Try file mirror first (no prompt)
+        if let data = FileManager.default.contents(atPath: Self.mirrorPath),
+           let creds = try? JSONDecoder().decode(OAuthCredentials.self, from: data) {
+            cache.set(creds)
+            return creds
         }
 
-        // Fall back to Claude Code's item (may prompt once)
-        guard let data = readItem(service: Self.sourceService) else {
+        // Fall back to Claude Code's Keychain item (prompts once)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.sourceService,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess else {
             throw KeychainError.itemNotFound
+        }
+
+        guard let data = result as? Data else {
+            throw KeychainError.unexpectedData
         }
 
         do {
             let creds = try JSONDecoder().decode(OAuthCredentials.self, from: data)
-            // Mirror to our own item for future prompt-free reads
-            writeItem(service: Self.mirrorService, data: data)
+            // Save to file mirror for future prompt-free reads
+            saveMirror(data)
             cache.set(creds)
             return creds
         } catch {
@@ -70,7 +86,7 @@ final class KeychainService: Sendable {
     }
 
     func updateMirror(with data: Data) {
-        writeItem(service: Self.mirrorService, data: data)
+        saveMirror(data)
         if let creds = try? JSONDecoder().decode(OAuthCredentials.self, from: data) {
             cache.set(creds)
         }
@@ -86,29 +102,9 @@ final class KeychainService: Sendable {
 
     // MARK: - Private
 
-    private func readItem(service: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { return nil }
-        return result as? Data
-    }
-
-    private func writeItem(service: String, data: Data) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service
-        ]
-        // Delete existing, then add new
-        SecItemDelete(query as CFDictionary)
-
-        var addQuery = query
-        addQuery[kSecValueData as String] = data
-        SecItemAdd(addQuery as CFDictionary, nil)
+    private func saveMirror(_ data: Data) {
+        FileManager.default.createFile(atPath: Self.mirrorPath, contents: data)
+        // Restrict permissions to owner only (chmod 600)
+        chmod(Self.mirrorPath, 0o600)
     }
 }
