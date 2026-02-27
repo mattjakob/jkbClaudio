@@ -12,32 +12,110 @@ actor SessionService {
 
     func getActiveSessions() -> [SessionEntry] {
         let activeProjectPaths = getClaudeProcessPaths()
-        let allSessions = loadAllSessions()
-            .sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
+        var results: [SessionEntry] = []
 
-        // For each active claude process CWD, find the most recent session whose projectPath matches
-        var activeSessions: [SessionEntry] = []
-        var seenProjects = Set<String>()
-
-        for session in allSessions {
-            let isRunning = activeProjectPaths.contains { session.projectPath.hasPrefix($0) || $0.hasPrefix(session.projectPath) }
-            if isRunning && !seenProjects.contains(session.projectPath) {
-                seenProjects.insert(session.projectPath)
-                activeSessions.append(session)
+        // For each running claude process, find or create a session entry
+        for projectPath in activeProjectPaths {
+            if let session = findSessionForPath(projectPath) {
+                results.append(session)
             }
         }
 
-        // Also include recent non-running sessions (last 24h)
+        // Also include recent indexed sessions not already covered
+        let coveredPaths = Set(results.map(\.projectPath))
+        let allIndexed = loadAllSessions()
         let cutoff = Date().addingTimeInterval(-86400)
-        for session in allSessions {
-            if !seenProjects.contains(session.projectPath),
+        for session in allIndexed {
+            if !coveredPaths.contains(session.projectPath),
                let modified = session.modifiedDate, modified > cutoff {
-                seenProjects.insert(session.projectPath)
-                activeSessions.append(session)
+                results.append(session)
             }
         }
 
-        return activeSessions
+        return results.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
+    }
+
+    private func findSessionForPath(_ projectPath: String) -> SessionEntry? {
+        let fm = FileManager.default
+
+        // Convert project path to claude's directory naming convention
+        // /Users/mattjakob/Documents/Code/Python/jkbTrader -> -Users-mattjakob-Documents-Code-Python-jkbTrader
+        let dirName = projectPath.replacingOccurrences(of: "/", with: "-")
+
+        // Try exact match first, then parent directories
+        let candidates = [dirName] + parentDirNames(dirName)
+
+        for candidate in candidates {
+            let dirPath = "\(projectsDir)/\(candidate)"
+
+            // Try sessions-index.json first
+            let indexPath = "\(dirPath)/sessions-index.json"
+            if let data = fm.contents(atPath: indexPath),
+               let index = try? JSONDecoder().decode(SessionsIndex.self, from: data),
+               let latest = index.entries.sorted(by: { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }).first {
+                return latest
+            }
+
+            // Fall back to most recently modified .jsonl file
+            guard let files = try? fm.contentsOfDirectory(atPath: dirPath) else { continue }
+            let jsonlFiles = files.filter { $0.hasSuffix(".jsonl") }
+
+            var latestFile: String?
+            var latestMtime: Date = .distantPast
+
+            for file in jsonlFiles {
+                let filePath = "\(dirPath)/\(file)"
+                guard let attrs = try? fm.attributesOfItem(atPath: filePath),
+                      let mtime = attrs[.modificationDate] as? Date else { continue }
+                if mtime > latestMtime {
+                    latestMtime = mtime
+                    latestFile = file
+                }
+            }
+
+            if let file = latestFile {
+                let sessionId = String(file.dropLast(6)) // remove .jsonl
+                return SessionEntry(
+                    sessionId: sessionId,
+                    fullPath: "\(dirPath)/\(file)",
+                    fileMtime: Int64(latestMtime.timeIntervalSince1970 * 1000),
+                    firstPrompt: nil,
+                    summary: nil,
+                    messageCount: 0,
+                    created: ISO8601DateFormatter().string(from: latestMtime),
+                    modified: ISO8601DateFormatter().string(from: latestMtime),
+                    gitBranch: nil,
+                    projectPath: projectPath,
+                    isSidechain: false
+                )
+            }
+        }
+
+        // No session files found — create a minimal entry from the process info
+        let projectName = projectPath.components(separatedBy: "/").last ?? projectPath
+        return SessionEntry(
+            sessionId: UUID().uuidString,
+            fullPath: "",
+            fileMtime: Int64(Date().timeIntervalSince1970 * 1000),
+            firstPrompt: nil,
+            summary: nil,
+            messageCount: 0,
+            created: ISO8601DateFormatter().string(from: Date()),
+            modified: ISO8601DateFormatter().string(from: Date()),
+            gitBranch: nil,
+            projectPath: projectPath,
+            isSidechain: false
+        )
+    }
+
+    private func parentDirNames(_ dirName: String) -> [String] {
+        var parts = dirName.components(separatedBy: "-").filter { !$0.isEmpty }
+        var results: [String] = []
+        while parts.count > 1 {
+            parts.removeLast()
+            results.append("-" + parts.joined(separator: "-"))
+        }
+        return results
     }
 
     func getWeeklyStats() -> WeeklyStats {
