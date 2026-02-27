@@ -3,19 +3,19 @@ import SwiftUI
 
 enum ChartRange {
     case sevenDay
-    case sixHour
+    case fiveHour
 
     var label: String {
         switch self {
         case .sevenDay: "weekly"
-        case .sixHour: "5-hour"
+        case .fiveHour: "5-hour"
         }
     }
 
     var duration: TimeInterval {
         switch self {
         case .sevenDay: 7 * 86400
-        case .sixHour: 6 * 3600
+        case .fiveHour: 5 * 3600
         }
     }
 }
@@ -32,7 +32,7 @@ struct UsageChartCard: View {
     private var currentUtilization: Double {
         switch range {
         case .sevenDay: weeklyUtilization
-        case .sixHour: fiveHourUtilization
+        case .fiveHour: fiveHourUtilization
         }
     }
 
@@ -98,7 +98,7 @@ struct UsageChartCard: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.2)) {
-                range = range == .sevenDay ? .sixHour : .sevenDay
+                range = range == .sevenDay ? .fiveHour : .sevenDay
             }
         }
     }
