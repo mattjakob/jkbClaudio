@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+.DS_Store
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+.env
+.env.*
+!.env.example
