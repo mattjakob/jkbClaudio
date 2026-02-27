@@ -7,11 +7,13 @@ struct ClaudioApp: App {
     var body: some Scene {
         MenuBarExtra {
             PopoverView(viewModel: viewModel)
-                .frame(width: 320, height: 520)
+                .frame(width: 320, height: 620)
         } label: {
             MenuBarLabel(
                 utilization: viewModel.weeklyUtilization,
-                isConnected: viewModel.isConnected
+                isConnected: viewModel.isConnected,
+                icon: viewModel.menuBarIcon,
+                color: viewModel.menuBarColor
             )
             .task { viewModel.startPolling() }
         }

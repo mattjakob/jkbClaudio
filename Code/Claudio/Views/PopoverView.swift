@@ -2,19 +2,29 @@ import SwiftUI
 
 struct PopoverView: View {
     @Bindable var viewModel: AppViewModel
+    @State private var scrollID: Bool?
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 12) {
-                if !viewModel.isConnected, let error = viewModel.lastError {
-                    errorSection(error)
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 12) {
+                    if !viewModel.isConnected, let error = viewModel.lastError {
+                        errorSection(error)
+                    }
+                    chartSection
+                    if viewModel.extraUsageEnabled {
+                        extraUsageSection
+                    }
+                    sessionsSection
+                    BridgeSettingsView(bridge: viewModel.bridge)
+                    footerSection
                 }
-                chartSection
-                usageSection
-                sessionsSection
-                footerSection
+                .padding(16)
+                .id(true)
             }
-            .padding(16)
+            .onAppear {
+                proxy.scrollTo(true, anchor: .top)
+            }
         }
         .task {
             await viewModel.refresh()
@@ -32,18 +42,14 @@ struct PopoverView: View {
         )
     }
 
-    private var usageSection: some View {
-        UsageCard(
-            fiveHourUtilization: viewModel.fiveHourUtilization,
-            fiveHourResetsAt: viewModel.fiveHourResetsAt,
-            weeklyUtilization: viewModel.weeklyUtilization,
-            weeklyResetsAt: viewModel.weeklyResetsAt,
-            chartRange: $viewModel.chartRange,
-            extraUsageEnabled: viewModel.extraUsageEnabled,
-            extraUsageUtilization: viewModel.extraUsageUtilization,
-            extraUsageUsedDollars: viewModel.extraUsageUsedDollars,
-            extraUsageLimitDollars: viewModel.extraUsageLimitDollars
+    private var extraUsageSection: some View {
+        ExtraUsageBar(
+            utilization: viewModel.extraUsageUtilization,
+            usedDollars: viewModel.extraUsageUsedDollars,
+            limitDollars: viewModel.extraUsageLimitDollars
         )
+        .padding(14)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var sessionsSection: some View {

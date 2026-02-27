@@ -6,7 +6,11 @@ struct WatchedLine: Sendable {
 }
 
 actor SessionWatcher {
-    var onNewLine: (@Sendable (WatchedLine) async -> Void)?
+    private(set) var onNewLine: (@Sendable (WatchedLine) async -> Void)?
+
+    func setOnNewLine(_ handler: @escaping @Sendable (WatchedLine) async -> Void) {
+        onNewLine = handler
+    }
     private(set) var watchedPaths: Set<String> = []
     private var watchers: [String: WatchState] = [:]
 

@@ -9,7 +9,9 @@ actor TelegramService {
     private var offset: Int = 0
     private var pollingTask: Task<Void, Never>?
 
-    var chatId: Int?
+    private(set) var chatId: Int?
+
+    func setChatId(_ id: Int) { chatId = id }
 
     var isConfigured: Bool { !baseURL.isEmpty }
 

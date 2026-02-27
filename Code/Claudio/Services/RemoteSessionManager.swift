@@ -9,7 +9,11 @@ actor RemoteSessionManager {
 
     private var session: RemoteSession?
 
-    var onOutput: (@Sendable (String) async -> Void)?
+    private(set) var onOutput: (@Sendable (String) async -> Void)?
+
+    func setOnOutput(_ handler: @escaping @Sendable (String) async -> Void) {
+        onOutput = handler
+    }
 
     var hasActiveSession: Bool { session != nil }
 
@@ -29,7 +33,7 @@ actor RemoteSessionManager {
         process.arguments = ["-p", prompt, "--output-format", "stream-json"]
         process.currentDirectoryURL = URL(fileURLWithPath: projectPath)
 
-        var env = ProcessInfo.processInfo.environment
+        var env = Foundation.ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"
         process.environment = env
 

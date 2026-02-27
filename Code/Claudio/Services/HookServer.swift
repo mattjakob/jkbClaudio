@@ -7,7 +7,11 @@ actor HookServer {
     private var pendingPermissions: [String: CheckedContinuation<HookPermissionResponse, Never>] = [:]
     private var nextPermissionId: Int = 0
 
-    var onEvent: (@Sendable (HookEvent, String) async -> Void)?
+    private(set) var onEvent: (@Sendable (HookEvent, String) async -> Void)?
+
+    func setOnEvent(_ handler: @escaping @Sendable (HookEvent, String) async -> Void) {
+        onEvent = handler
+    }
 
     func start() throws {
         guard let port = NWEndpoint.Port(rawValue: 19876) else {

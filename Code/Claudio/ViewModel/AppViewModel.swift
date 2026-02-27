@@ -22,6 +22,7 @@ final class AppViewModel {
     private let sessionService = SessionService()
     private let historyService = UsageHistoryService()
     private let otelReceiver = OTelReceiver()
+    let bridge = BridgeCoordinator()
     var otelConnected = false
     var extraUsageEnabled = false
     var extraUsageUtilization: Double = 0
@@ -32,13 +33,19 @@ final class AppViewModel {
 
     var menuBarText: String {
         if !isConnected { return "" }
-        return "\(Int(weeklyUtilization))%"
+        return "\(Int(fiveHourUtilization))%"
     }
 
     var menuBarColor: Color {
-        if weeklyUtilization >= 80 { return .widgetRed }
-        if weeklyUtilization >= 60 { return .widgetYellow }
+        if fiveHourUtilization >= 80 { return .widgetRed }
+        if fiveHourUtilization >= 60 { return .widgetYellow }
         return .white
+    }
+
+    var menuBarIcon: String {
+        if fiveHourUtilization >= 80 { return "flame.fill" }
+        if fiveHourUtilization >= 60 { return "dog.fill" }
+        return "leaf.fill"
     }
 
     func startPolling() {
@@ -68,6 +75,8 @@ final class AppViewModel {
                 otelConnected = false
             }
         }
+
+        Task { await bridge.start() }
     }
 
     func stopPolling() {
@@ -76,6 +85,7 @@ final class AppViewModel {
         if let activity { Foundation.ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
         Task { await otelReceiver.stop() }
+        Task { await bridge.stop() }
     }
 
     func refresh() async {
@@ -110,5 +120,6 @@ final class AppViewModel {
         }
 
         activeSessions = await sessionService.getActiveSessions()
+        await bridge.updateWatchedSessions(activeSessions)
     }
 }
