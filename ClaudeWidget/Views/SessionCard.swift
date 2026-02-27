@@ -81,79 +81,68 @@ struct SessionRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Circle()
-                .fill(isActive ? .green : .gray.opacity(0.4))
-                .frame(width: 8, height: 8)
-                .padding(.top, 5)
+        VStack(alignment: .leading, spacing: 4) {
+            // Row 1: project name + time ago
+            HStack {
+                Text(session.projectName)
+                    .font(.callout)
+                    .fontWeight(.medium)
+                    .foregroundStyle(isActive ? .green : .secondary)
+                Spacer()
+                Text(timeAgo)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
 
-            VStack(alignment: .leading, spacing: 4) {
-                // Row 1: project name + time ago
-                HStack {
-                    Text(session.projectName)
-                        .font(.callout)
-                        .fontWeight(.medium)
-                    if !isActive {
-                        Text("idle")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer()
-                    Text(timeAgo)
+            // Row 2: model + permission + branch
+            HStack(spacing: 8) {
+                if let model = modelShort {
+                    BiLabel(text: model, icon: "bi-cpu")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if let perm = permissionLabel {
+                    BiLabel(text: perm, icon: "bi-shield-lock")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if let branch = session.gitBranch {
+                    BiLabel(text: branch, icon: "bi-diagram-3")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Row 3: subagents/terminal + turn time
+            HStack(spacing: 8) {
+                if session.subagentCount > 0 {
+                    BiLabel(text: "\(session.subagentCount)", icon: "bi-people")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    BiLabel(text: "1", icon: "bi-terminal-plus")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if session.totalDurationMs > 0 {
+                    BiLabel(text: formatDurationMs(session.totalDurationMs), icon: "bi-hourglass-split")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // Row 4: process stats (only for active processes)
+            if isActive && session.elapsedSeconds > 0 {
+                HStack(spacing: 8) {
+                    BiLabel(text: formatDuration(session.elapsedSeconds), icon: "bi-stopwatch")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                }
-
-                // Row 2: model + permission + branch
-                HStack(spacing: 8) {
-                    if let model = modelShort {
-                        BiLabel(text: model, icon: "bi-cpu")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let perm = permissionLabel {
-                        BiLabel(text: perm, icon: "bi-shield-lock")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let branch = session.gitBranch {
-                        BiLabel(text: branch, icon: "bi-diagram-3")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // Row 3: subagents/terminal + turn time
-                HStack(spacing: 8) {
-                    if session.subagentCount > 0 {
-                        BiLabel(text: "\(session.subagentCount)", icon: "bi-people")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        BiLabel(text: "1", icon: "bi-terminal-plus")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if session.totalDurationMs > 0 {
-                        BiLabel(text: formatDurationMs(session.totalDurationMs), icon: "bi-hourglass-split")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                // Row 4: process stats (only for active processes)
-                if isActive && session.elapsedSeconds > 0 {
-                    HStack(spacing: 8) {
-                        BiLabel(text: formatDuration(session.elapsedSeconds), icon: "bi-stopwatch")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        BiLabel(text: formatMemory(session.memoryMB), icon: "bi-memory")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        BiLabel(text: String(format: "%.0f%%", session.cpuPercent), icon: "bi-speedometer2")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
+                    BiLabel(text: formatMemory(session.memoryMB), icon: "bi-memory")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    BiLabel(text: String(format: "%.0f%%", session.cpuPercent), icon: "bi-speedometer2")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
         }
