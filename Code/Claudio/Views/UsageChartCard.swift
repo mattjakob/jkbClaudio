@@ -97,7 +97,7 @@ struct UsageChartCard: View {
         guard let last = filtered.last, end > last.timestamp else { return nil }
         let lastValue = range == .sevenDay ? last.weekly : last.fiveHour
         let elapsed = last.timestamp.timeIntervalSince(start)
-        guard elapsed > range.duration * 0.05 else { return nil }
+        guard elapsed > min(range.duration * 0.05, 3600) else { return nil }
         let remaining = end.timeIntervalSince(last.timestamp)
         return lastValue + (lastValue / elapsed) * remaining
     }
