@@ -16,9 +16,9 @@ actor OTelReceiver {
             self?.handleConnection(connection)
         }
 
-        listener.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
-                print("OTel listener failed: \(error)")
+        listener.stateUpdateHandler = { [weak self] state in
+            if case .failed = state {
+                Task { await self?.stop() }
             }
         }
 
