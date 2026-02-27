@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 enum KeychainError: Error, LocalizedError {
@@ -44,11 +45,15 @@ final class KeychainService: Sendable {
             return cached
         }
 
+        let context = LAContext()
+        context.localizedReason = "Claude Widget needs to read your Claude Code login to show usage stats."
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.serviceName,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
         ]
 
         var result: AnyObject?

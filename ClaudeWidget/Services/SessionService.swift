@@ -181,8 +181,6 @@ actor SessionService {
     }
 
     private func withBranch(_ s: SessionEntry, _ branch: String) -> SessionEntry {
-        var copy = s
-        // gitBranch is let, so we use a new entry
         return SessionEntry(
             sessionId: s.sessionId, fullPath: s.fullPath, fileMtime: s.fileMtime,
             firstPrompt: s.firstPrompt, summary: s.summary,
