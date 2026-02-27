@@ -11,7 +11,9 @@ struct UsageWindow: Codable, Sendable {
 
     var resetsAtDate: Date? {
         guard let resetsAt else { return nil }
-        return ISO8601DateFormatter().date(from: resetsAt)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: resetsAt)
     }
 }
 

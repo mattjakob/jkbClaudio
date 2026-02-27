@@ -13,14 +13,15 @@ actor SessionService {
     func getActiveSessions() -> [SessionEntry] {
         let activePIDs = getClaudeProcessSessionIds()
         let allSessions = loadAllSessions()
+            .sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
 
-        let cutoff = Date().addingTimeInterval(-3600)
+        // Mark running processes as active; also include recent sessions (last 24h)
+        let cutoff = Date().addingTimeInterval(-86400)
         return allSessions.filter { session in
             let isRunning = activePIDs.contains(session.sessionId)
             let isRecent = session.modifiedDate.map { $0 > cutoff } ?? false
             return isRunning || isRecent
         }
-        .sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
     }
 
     func getWeeklyStats() -> WeeklyStats {
@@ -40,18 +41,18 @@ actor SessionService {
         let sessions = weeklyActivity.reduce(0) { $0 + $1.sessionCount }
         let messages = weeklyActivity.reduce(0) { $0 + $1.messageCount }
 
-        var inputTokens: Int64 = 0
-        var outputTokens: Int64 = 0
-        for (_, usage) in cache.modelUsage {
-            inputTokens += usage.inputTokens
-            outputTokens += usage.outputTokens
+        let weeklyTokenDays = cache.dailyModelTokens?.filter { $0.date >= weekStartStr } ?? []
+        var totalTokens: Int64 = 0
+        for day in weeklyTokenDays {
+            for (_, tokens) in day.tokensByModel {
+                totalTokens += tokens
+            }
         }
 
         return WeeklyStats(
             sessions: sessions,
             messages: messages,
-            inputTokens: inputTokens,
-            outputTokens: outputTokens,
+            totalTokens: totalTokens,
             dailyActivity: weeklyActivity
         )
     }

@@ -14,10 +14,16 @@ struct ModelTokens: Codable, Sendable {
     let cacheCreationInputTokens: Int64
 }
 
+struct DailyModelTokens: Codable, Sendable {
+    let date: String
+    let tokensByModel: [String: Int64]
+}
+
 struct StatsCache: Codable, Sendable {
     let version: Int
     let lastComputedDate: String
     let dailyActivity: [DailyActivity]
+    let dailyModelTokens: [DailyModelTokens]?
     let modelUsage: [String: ModelTokens]
     let totalSessions: Int
     let totalMessages: Int
@@ -28,7 +34,6 @@ struct StatsCache: Codable, Sendable {
 struct WeeklyStats: Sendable {
     var sessions: Int = 0
     var messages: Int = 0
-    var inputTokens: Int64 = 0
-    var outputTokens: Int64 = 0
+    var totalTokens: Int64 = 0
     var dailyActivity: [DailyActivity] = []
 }

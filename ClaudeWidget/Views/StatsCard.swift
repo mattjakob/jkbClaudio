@@ -63,10 +63,7 @@ struct StatsCard: View {
 
             StatRow(label: "Sessions", value: "\(stats.sessions)")
             StatRow(label: "Messages", value: stats.messages.formatted())
-            StatRow(
-                label: "Tokens",
-                value: "\(formatTokens(stats.inputTokens)) in / \(formatTokens(stats.outputTokens)) out"
-            )
+            StatRow(label: "Tokens", value: formatTokens(stats.totalTokens))
 
             if !stats.dailyActivity.isEmpty {
                 SparklineView(values: stats.dailyActivity.map(\.messageCount))
