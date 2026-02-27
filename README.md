@@ -1,6 +1,6 @@
 # Claudio
 
-<img src="https://raw.githubusercontent.com/mattjakob/jkbClaudio/main/Code/logo.png" alt="Claudio" width="128">
+<img src="https://raw.githubusercontent.com/mattjakob/jkbClaudio/main/Code/logo_icon.png" alt="Claudio" width="128">
 
 A macOS menu bar app that monitors Claude Code usage and active sessions in real time.
 
