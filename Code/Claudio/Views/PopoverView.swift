@@ -17,7 +17,7 @@ struct PopoverView: View {
             .padding(16)
         }
         .task {
-            viewModel.startPolling()
+            await viewModel.refresh()
         }
     }
 

@@ -13,6 +13,7 @@ struct ClaudioApp: App {
                 utilization: viewModel.weeklyUtilization,
                 isConnected: viewModel.isConnected
             )
+            .task { viewModel.startPolling() }
         }
         .menuBarExtraStyle(.window)
     }
