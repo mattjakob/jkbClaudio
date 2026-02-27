@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClaudeWidget",
+    name: "Claudio",
     platforms: [.macOS(.v26)],
     targets: [
         .executableTarget(
-            name: "ClaudeWidget",
-            path: "ClaudeWidget",
-            exclude: ["Info.plist", "ClaudeWidget.entitlements"],
+            name: "Claudio",
+            path: "Claudio",
+            exclude: ["Info.plist", "Claudio.entitlements"],
             resources: [.process("Resources")]
         )
     ]

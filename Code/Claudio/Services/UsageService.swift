@@ -14,7 +14,7 @@ actor UsageService {
         var request = URLRequest(url: apiURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("ClaudeWidget/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("Claudio/1.0", forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -56,14 +56,16 @@ actor UsageService {
 
         struct RefreshResponse: Codable {
             let access_token: String
+            let refresh_token: String?
         }
 
         let refreshResponse = try JSONDecoder().decode(RefreshResponse.self, from: data)
         let newToken = refreshResponse.access_token
+        let newRefreshToken = refreshResponse.refresh_token ?? refreshToken
 
         // Update mirror with refreshed token
         let updated = OAuthCredentials(
-            claudeAiOauth: .init(accessToken: newToken, refreshToken: refreshToken)
+            claudeAiOauth: .init(accessToken: newToken, refreshToken: newRefreshToken)
         )
         if let encoded = try? JSONEncoder().encode(updated) {
             KeychainService.shared.updateMirror(with: encoded)

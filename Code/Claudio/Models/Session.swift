@@ -4,12 +4,12 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     let sessionId: String
     let fullPath: String
     let fileMtime: Int64
-    let firstPrompt: String?
+    var firstPrompt: String?
     let summary: String?
     let messageCount: Int
     let created: String
     let modified: String
-    let gitBranch: String?
+    var gitBranch: String?
     let projectPath: String
     let isSidechain: Bool
 
@@ -33,15 +33,13 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     var id: String { sessionId }
 
     var createdDate: Date? {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fmt.date(from: created) ?? ISO8601DateFormatter().date(from: created)
+        ISO8601DateFormatter.withFractionalSeconds.date(from: created)
+            ?? ISO8601DateFormatter.standard.date(from: created)
     }
 
     var modifiedDate: Date? {
-        let fmt = ISO8601DateFormatter()
-        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fmt.date(from: modified) ?? ISO8601DateFormatter().date(from: modified)
+        ISO8601DateFormatter.withFractionalSeconds.date(from: modified)
+            ?? ISO8601DateFormatter.standard.date(from: modified)
     }
 
     var projectName: String {

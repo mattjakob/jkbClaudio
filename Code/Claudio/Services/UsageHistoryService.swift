@@ -35,7 +35,8 @@ actor UsageHistoryService {
 
     private func save() {
         guard let data = try? JSONEncoder.withISO8601.encode(history) else { return }
-        FileManager.default.createFile(atPath: filePath, contents: data)
+        let url = URL(fileURLWithPath: filePath)
+        try? data.write(to: url, options: .atomic)
     }
 }
 

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct ClaudeWidgetApp: App {
+struct ClaudioApp: App {
     @State private var viewModel = AppViewModel()
 
     var body: some Scene {

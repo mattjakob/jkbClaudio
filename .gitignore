@@ -4,6 +4,7 @@
 *.xcodeproj/
 *.xcworkspace/
 DerivedData/
+*.dmg
 .env
 .env.*
 !.env.example

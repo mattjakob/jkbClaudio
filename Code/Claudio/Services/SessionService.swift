@@ -11,6 +11,9 @@ actor SessionService {
     private let claudeDir: String
     private let projectsDir: String
 
+    // Cache for indexed sessions — invalidated when directory mtime changes
+    private var indexCache: [String: (mtime: Date, entries: [SessionEntry])] = [:]
+
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.claudeDir = "\(home)/.claude"
@@ -84,8 +87,8 @@ actor SessionService {
                     fullPath: "\(dirPath)/\(file)",
                     fileMtime: Int64(latestMtime.timeIntervalSince1970 * 1000),
                     firstPrompt: nil, summary: nil, messageCount: 0,
-                    created: ISO8601DateFormatter().string(from: latestMtime),
-                    modified: ISO8601DateFormatter().string(from: latestMtime),
+                    created: ISO8601DateFormatter.standard.string(from: latestMtime),
+                    modified: ISO8601DateFormatter.standard.string(from: latestMtime),
                     gitBranch: nil, projectPath: projectPath, isSidechain: false
                 )
             }
@@ -95,8 +98,8 @@ actor SessionService {
             sessionId: UUID().uuidString, fullPath: "",
             fileMtime: Int64(Date().timeIntervalSince1970 * 1000),
             firstPrompt: nil, summary: nil, messageCount: 0,
-            created: ISO8601DateFormatter().string(from: Date()),
-            modified: ISO8601DateFormatter().string(from: Date()),
+            created: ISO8601DateFormatter.standard.string(from: Date()),
+            modified: ISO8601DateFormatter.standard.string(from: Date()),
             gitBranch: nil, projectPath: projectPath, isSidechain: false
         )
     }
@@ -120,7 +123,7 @@ actor SessionService {
         var permissionMode: String?
 
         for line in lines {
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
 
             let type = obj["type"] as? String ?? ""
 
@@ -182,49 +185,9 @@ actor SessionService {
         session.topTools = tools
         session.totalDurationMs = totalDurationMs
         if let permissionMode { session.permissionMode = permissionMode }
-        if let branch { session = withBranch(session, branch) }
+        if let branch { session.gitBranch = branch }
         if let model { session.model = model }
-        if session.firstPrompt == nil, let firstPrompt { session = withFirstPrompt(session, firstPrompt) }
-    }
-
-    private func withBranch(_ s: SessionEntry, _ branch: String) -> SessionEntry {
-        var copy = SessionEntry(
-            sessionId: s.sessionId, fullPath: s.fullPath, fileMtime: s.fileMtime,
-            firstPrompt: s.firstPrompt, summary: s.summary,
-            messageCount: s.userMessages > 0 ? s.userMessages : s.messageCount,
-            created: s.created, modified: s.modified, gitBranch: branch,
-            projectPath: s.projectPath, isSidechain: s.isSidechain,
-            userMessages: s.userMessages, assistantTurns: s.assistantTurns,
-            toolCalls: s.toolCalls, subagentCount: s.subagentCount,
-            tokensIn: s.tokensIn, tokensOut: s.tokensOut,
-            model: s.model, topTools: s.topTools
-        )
-        copy.permissionMode = s.permissionMode
-        copy.totalDurationMs = s.totalDurationMs
-        copy.elapsedSeconds = s.elapsedSeconds
-        copy.memoryMB = s.memoryMB
-        copy.cpuPercent = s.cpuPercent
-        return copy
-    }
-
-    private func withFirstPrompt(_ s: SessionEntry, _ prompt: String) -> SessionEntry {
-        var copy = SessionEntry(
-            sessionId: s.sessionId, fullPath: s.fullPath, fileMtime: s.fileMtime,
-            firstPrompt: prompt, summary: s.summary,
-            messageCount: s.userMessages > 0 ? s.userMessages : s.messageCount,
-            created: s.created, modified: s.modified, gitBranch: s.gitBranch,
-            projectPath: s.projectPath, isSidechain: s.isSidechain,
-            userMessages: s.userMessages, assistantTurns: s.assistantTurns,
-            toolCalls: s.toolCalls, subagentCount: s.subagentCount,
-            tokensIn: s.tokensIn, tokensOut: s.tokensOut,
-            model: s.model, topTools: s.topTools
-        )
-        copy.permissionMode = s.permissionMode
-        copy.totalDurationMs = s.totalDurationMs
-        copy.elapsedSeconds = s.elapsedSeconds
-        copy.memoryMB = s.memoryMB
-        copy.cpuPercent = s.cpuPercent
-        return copy
+        if session.firstPrompt == nil, let firstPrompt { session.firstPrompt = firstPrompt }
     }
 
     private func parentDirNames(_ dirName: String) -> [String] {
@@ -237,63 +200,34 @@ actor SessionService {
         return results
     }
 
-    func getWeeklyStats() -> WeeklyStats {
-        guard let cache = loadStatsCache() else { return WeeklyStats() }
-
-        let calendar = Calendar.current
-        let now = Date()
-        guard let weekStart = calendar.date(from: calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)) else {
-            return WeeklyStats()
-        }
-
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let weekStartStr = dateFormatter.string(from: weekStart)
-
-        let weeklyActivity = cache.dailyActivity.filter { $0.date >= weekStartStr }
-        let sessions = weeklyActivity.reduce(0) { $0 + $1.sessionCount }
-        let messages = weeklyActivity.reduce(0) { $0 + $1.messageCount }
-
-        let weeklyTokenDays = cache.dailyModelTokens?.filter { $0.date >= weekStartStr } ?? []
-        var totalTokens: Int64 = 0
-        for day in weeklyTokenDays {
-            for (_, tokens) in day.tokensByModel {
-                totalTokens += tokens
-            }
-        }
-
-        return WeeklyStats(
-            sessions: sessions,
-            messages: messages,
-            totalTokens: totalTokens,
-            dailyActivity: weeklyActivity
-        )
-    }
-
     private func loadAllSessions() -> [SessionEntry] {
         let fm = FileManager.default
         guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return [] }
 
         var sessions: [SessionEntry] = []
         for dir in projectDirs {
-            let indexPath = "\(projectsDir)/\(dir)/sessions-index.json"
+            let dirPath = "\(projectsDir)/\(dir)"
+            let indexPath = "\(dirPath)/sessions-index.json"
+
+            // Check directory mtime for cache invalidation
+            let dirMtime = (try? fm.attributesOfItem(atPath: dirPath))?[.modificationDate] as? Date
+
+            if let dirMtime, let cached = indexCache[dir], cached.mtime == dirMtime {
+                sessions.append(contentsOf: cached.entries)
+                continue
+            }
+
             guard let data = fm.contents(atPath: indexPath) else { continue }
             guard let index = try? JSONDecoder().decode(SessionsIndex.self, from: data) else { continue }
+            indexCache[dir] = (mtime: dirMtime ?? .distantPast, entries: index.entries)
             sessions.append(contentsOf: index.entries)
         }
         return sessions
     }
 
-    private func loadStatsCache() -> StatsCache? {
-        let path = "\(claudeDir)/stats-cache.json"
-        guard let data = FileManager.default.contents(atPath: path) else { return nil }
-        return try? JSONDecoder().decode(StatsCache.self, from: data)
-    }
-
     // MARK: - Process detection
 
     private nonisolated func getClaudeProcessInfos() -> [ProcessInfo] {
-        // Get PIDs of running claude processes
         let pgrepPipe = Pipe()
         let pgrep = Process()
         pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
@@ -341,7 +275,7 @@ actor SessionService {
         let lsofPipe = Pipe()
         let lsof = Process()
         lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        lsof.arguments = ["-a", "-d", "cwd", "-p", pids.joined(separator: ",")] + ["-Fpn"]
+        lsof.arguments = ["-a", "-d", "cwd", "-p", pids.joined(separator: ","), "-Fpn"]
         lsof.standardOutput = lsofPipe
         lsof.standardError = FileHandle.nullDevice
 
@@ -350,7 +284,6 @@ actor SessionService {
         let lsofData = lsofPipe.fileHandleForReading.readDataToEndOfFile()
         let lsofOutput = String(data: lsofData, encoding: .utf8) ?? ""
 
-        // Parse lsof -Fpn: p<pid>\nn<path>\n pairs
         var results: [ProcessInfo] = []
         var currentPid: String?
         for line in lsofOutput.components(separatedBy: "\n") {
@@ -375,7 +308,6 @@ actor SessionService {
         var total = 0
         var str = etime
 
-        // Handle dd- prefix
         if let dashIdx = str.firstIndex(of: "-") {
             let days = Int(str[str.startIndex..<dashIdx]) ?? 0
             total += days * 86400

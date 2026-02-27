@@ -4,11 +4,15 @@ struct SessionRow: View {
     let session: SessionEntry
     let isActive: Bool
 
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     private var timeAgo: String {
         guard let modified = session.modifiedDate else { return "" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: modified, relativeTo: .now)
+        return Self.relativeFormatter.localizedString(for: modified, relativeTo: .now)
     }
 
     private var modelShort: String? {
@@ -66,19 +70,17 @@ struct SessionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Row 1: project name + time ago
             HStack {
                 Text(session.projectName)
                     .font(.callout)
                     .fontWeight(.medium)
-                    .foregroundStyle(isActive ? .green : .secondary)
+                    .foregroundStyle(isActive ? Color.widgetActive : .secondary)
                 Spacer()
                 Text(timeAgo)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
 
-            // Row 2: model + permission + branch
             HStack(spacing: 8) {
                 if let model = modelShort {
                     Label(model, systemImage: "terminal")
@@ -97,25 +99,23 @@ struct SessionRow: View {
                 }
             }
 
-            // Row 3: subagents/terminal + turn time
             HStack(spacing: 8) {
                 if session.subagentCount > 0 {
-                    Label("\(session.subagentCount)", systemImage: "sparkles.square.filled.on.square")
+                    Label("\(session.subagentCount) subagent\(session.subagentCount == 1 ? "" : "s")", systemImage: "sparkles.square.filled.on.square")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
-                    Label("1", systemImage: "sparkles")
+                    Label("1 agent", systemImage: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
                 if session.totalDurationMs > 0 {
-                    Label(formatDurationMs(session.totalDurationMs), systemImage: "hourglass")
+                    Text("(\(formatDurationMs(session.totalDurationMs)) thinking)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
             }
 
-            // Row 4: process stats (only for active processes)
             if isActive && session.elapsedSeconds > 0 {
                 HStack(spacing: 8) {
                     Label(formatDuration(session.elapsedSeconds), systemImage: "timer")
@@ -137,25 +137,26 @@ struct SessionCard: View {
     let sessions: [SessionEntry]
 
     var body: some View {
+        let displayed = Array(sessions.prefix(5))
         VStack(alignment: .leading, spacing: 10) {
             Text("Sessions")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
 
-            if sessions.isEmpty {
+            if displayed.isEmpty {
                 Text("No recent sessions")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
             } else {
-                ForEach(Array(sessions.prefix(5))) { session in
+                ForEach(displayed.indices, id: \.self) { i in
                     SessionRow(
-                        session: session,
-                        isActive: session.elapsedSeconds > 0
+                        session: displayed[i],
+                        isActive: displayed[i].elapsedSeconds > 0 && displayed[i].cpuPercent > 0.5
                     )
-                    if session.id != sessions.prefix(5).last?.id {
+                    if i < displayed.count - 1 {
                         Divider().opacity(0.3)
                     }
                 }

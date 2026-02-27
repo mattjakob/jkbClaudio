@@ -32,31 +32,23 @@ struct UsageChartCard: View {
         range == .sevenDay ? weeklyUtilization : fiveHourUtilization
     }
 
-    private var resetsAt: Date? {
-        range == .sevenDay ? weeklyResetsAt : fiveHourResetsAt
-    }
-
     private var barColor: Color {
-        if currentUtilization >= 80 { return .red }
-        if currentUtilization >= 60 { return .yellow }
+        if currentUtilization >= 80 { return .widgetRed }
+        if currentUtilization >= 60 { return .widgetYellow }
         return .white
     }
 
     private var resetText: String {
+        let resetsAt = range == .sevenDay ? weeklyResetsAt : fiveHourResetsAt
         guard let resetsAt else { return "" }
         return "Resets \(formatReset(resetsAt))"
     }
 
-    private var domainStart: Date {
-        Date().addingTimeInterval(-range.duration)
-    }
-
-    private var filteredReadings: [UsageReading] {
-        let start = domainStart
-        return readings.filter { $0.timestamp >= start }
-    }
-
     var body: some View {
+        let end = (range == .sevenDay ? weeklyResetsAt : fiveHourResetsAt) ?? Date()
+        let start = end.addingTimeInterval(-range.duration)
+        let filtered = readings.filter { $0.timestamp >= start && $0.timestamp <= end }
+
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(range.label)
@@ -69,8 +61,8 @@ struct UsageChartCard: View {
                     .foregroundStyle(barColor)
             }
 
-            if filteredReadings.count >= 2 {
-                chart
+            if filtered.count >= 2 {
+                chartView(filtered: filtered, start: start, end: end)
             } else {
                 Text("Collecting usage data...")
                     .font(.caption2)
@@ -92,11 +84,19 @@ struct UsageChartCard: View {
                 range = range == .sevenDay ? .fiveHour : .sevenDay
             }
         }
+        .onHover { hovering in
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
     }
 
-    private var chart: some View {
-        Chart {
-            ForEach(Array(filteredReadings.enumerated()), id: \.offset) { _, reading in
+    private func chartView(filtered: [UsageReading], start: Date, end: Date) -> some View {
+        let color = barColor
+        return Chart {
+            ForEach(Array(filtered.enumerated()), id: \.offset) { _, reading in
                 let value = range == .sevenDay ? reading.weekly : reading.fiveHour
 
                 AreaMark(
@@ -105,7 +105,7 @@ struct UsageChartCard: View {
                 )
                 .foregroundStyle(
                     .linearGradient(
-                        colors: [barColor.opacity(0.3), barColor.opacity(0.02)],
+                        colors: [color.opacity(0.3), color.opacity(0.02)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
@@ -116,14 +116,14 @@ struct UsageChartCard: View {
                     x: .value("Time", reading.timestamp),
                     y: .value("Usage", value)
                 )
-                .foregroundStyle(barColor.opacity(0.8))
+                .foregroundStyle(color.opacity(0.8))
                 .lineStyle(StrokeStyle(lineWidth: 1.5))
                 .interpolationMethod(.catmullRom)
             }
         }
-        .chartXScale(domain: domainStart...Date())
+        .chartXScale(domain: start...end)
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 5)) { value in
+            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 6)) { value in
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
                         if range == .sevenDay {

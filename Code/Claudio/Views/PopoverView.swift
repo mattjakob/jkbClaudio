@@ -1,16 +1,17 @@
 import SwiftUI
 
 struct PopoverView: View {
-    let viewModel: AppViewModel
-    @State private var chartRange: ChartRange = .sevenDay
+    @Bindable var viewModel: AppViewModel
 
     var body: some View {
-        ScrollView {
+        ScrollView(showsIndicators: false) {
             VStack(spacing: 12) {
+                if !viewModel.isConnected, let error = viewModel.lastError {
+                    errorSection(error)
+                }
                 chartSection
                 usageSection
                 sessionsSection
-                statsSection
                 footerSection
             }
             .padding(16)
@@ -27,7 +28,7 @@ struct PopoverView: View {
             fiveHourUtilization: viewModel.fiveHourUtilization,
             weeklyResetsAt: viewModel.weeklyResetsAt,
             fiveHourResetsAt: viewModel.fiveHourResetsAt,
-            range: $chartRange
+            range: $viewModel.chartRange
         )
     }
 
@@ -37,7 +38,11 @@ struct PopoverView: View {
             fiveHourResetsAt: viewModel.fiveHourResetsAt,
             weeklyUtilization: viewModel.weeklyUtilization,
             weeklyResetsAt: viewModel.weeklyResetsAt,
-            chartRange: chartRange
+            chartRange: $viewModel.chartRange,
+            extraUsageEnabled: viewModel.extraUsageEnabled,
+            extraUsageUtilization: viewModel.extraUsageUtilization,
+            extraUsageUsedDollars: viewModel.extraUsageUsedDollars,
+            extraUsageLimitDollars: viewModel.extraUsageLimitDollars
         )
     }
 
@@ -45,8 +50,18 @@ struct PopoverView: View {
         SessionCard(sessions: viewModel.activeSessions)
     }
 
-    private var statsSection: some View {
-        StatsCard(stats: viewModel.weeklyStats)
+    private func errorSection(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(Color.widgetYellow)
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var footerSection: some View {
