@@ -59,6 +59,16 @@ actor UsageService {
         }
 
         let refreshResponse = try JSONDecoder().decode(RefreshResponse.self, from: data)
-        return refreshResponse.access_token
+        let newToken = refreshResponse.access_token
+
+        // Update mirror with refreshed token
+        let updated = OAuthCredentials(
+            claudeAiOauth: .init(accessToken: newToken, refreshToken: refreshToken)
+        )
+        if let encoded = try? JSONEncoder().encode(updated) {
+            KeychainService.shared.updateMirror(with: encoded)
+        }
+
+        return newToken
     }
 }
