@@ -59,26 +59,13 @@ struct UsageBar: View {
 struct UsageCard: View {
     let fiveHourUtilization: Double
     let fiveHourResetsAt: Date?
-    let weeklyUtilization: Double
-    let weeklyResetsAt: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Usage")
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundStyle(.secondary)
-
             UsageBar(
-                label: "5-Hour",
+                label: "5-Hour Window",
                 utilization: fiveHourUtilization,
                 resetsAt: fiveHourResetsAt
-            )
-
-            UsageBar(
-                label: "Weekly",
-                utilization: weeklyUtilization,
-                resetsAt: weeklyResetsAt
             )
         }
         .padding(14)
