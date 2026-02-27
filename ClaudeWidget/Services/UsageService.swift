@@ -6,7 +6,7 @@ actor UsageService {
     private let clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
     func fetchUsage() async throws -> UsageResponse {
-        let token = try KeychainService.getAccessToken()
+        let token = try KeychainService.shared.getAccessToken()
         return try await request(with: token)
     }
 
@@ -35,7 +35,7 @@ actor UsageService {
     }
 
     private func refreshAccessToken() async throws -> String {
-        let refreshToken = try KeychainService.getRefreshToken()
+        let refreshToken = try KeychainService.shared.getRefreshToken()
 
         var request = URLRequest(url: refreshURL)
         request.httpMethod = "POST"

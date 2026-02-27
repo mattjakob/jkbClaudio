@@ -15,13 +15,38 @@ enum KeychainError: Error, LocalizedError {
     }
 }
 
-struct KeychainService: Sendable {
-    static let serviceName = "Claude Code-credentials"
+final class KeychainService: Sendable {
+    static let shared = KeychainService()
+    private static let serviceName = "Claude Code-credentials"
 
-    static func getCredentials() throws -> OAuthCredentials {
+    // Cache credentials in memory after first Keychain read
+    private let cache = ManagedCache()
+
+    private final class ManagedCache: @unchecked Sendable {
+        private var credentials: OAuthCredentials?
+        private let lock = NSLock()
+
+        func get() -> OAuthCredentials? {
+            lock.lock()
+            defer { lock.unlock() }
+            return credentials
+        }
+
+        func set(_ creds: OAuthCredentials) {
+            lock.lock()
+            defer { lock.unlock() }
+            credentials = creds
+        }
+    }
+
+    func getCredentials() throws -> OAuthCredentials {
+        if let cached = cache.get() {
+            return cached
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
+            kSecAttrService as String: Self.serviceName,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -38,17 +63,19 @@ struct KeychainService: Sendable {
         }
 
         do {
-            return try JSONDecoder().decode(OAuthCredentials.self, from: data)
+            let creds = try JSONDecoder().decode(OAuthCredentials.self, from: data)
+            cache.set(creds)
+            return creds
         } catch {
             throw KeychainError.decodingFailed(error)
         }
     }
 
-    static func getAccessToken() throws -> String {
+    func getAccessToken() throws -> String {
         try getCredentials().claudeAiOauth.accessToken
     }
 
-    static func getRefreshToken() throws -> String {
+    func getRefreshToken() throws -> String {
         try getCredentials().claudeAiOauth.refreshToken
     }
 }
