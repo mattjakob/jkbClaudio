@@ -22,6 +22,13 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     var tokensOut: Int64 = 0
     var model: String?
     var topTools: [String: Int] = [:]
+    var permissionMode: String?
+    var totalDurationMs: Int64 = 0
+
+    // Process-level stats (from ps)
+    var elapsedSeconds: Int = 0
+    var memoryMB: Double = 0
+    var cpuPercent: Double = 0
 
     var id: String { sessionId }
 

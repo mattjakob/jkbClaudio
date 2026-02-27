@@ -11,14 +11,59 @@ struct SessionRow: View {
         return formatter.localizedString(for: modified, relativeTo: .now)
     }
 
-    private func formatTokens(_ count: Int64) -> String {
-        if count >= 1_000_000 {
-            return String(format: "%.1fM", Double(count) / 1_000_000)
+    private var modelShort: String? {
+        guard let model = session.model else { return nil }
+        // claude-opus-4-6 -> Opus 4.6
+        // claude-sonnet-4-6 -> Sonnet 4.6
+        let parts = model.replacingOccurrences(of: "claude-", with: "")
+            .components(separatedBy: "-")
+        guard parts.count >= 2 else { return model }
+        let name = parts[0].prefix(1).uppercased() + parts[0].dropFirst()
+        let version = parts[1...].joined(separator: ".")
+        return "\(name) \(version)"
+    }
+
+    private var permissionLabel: String? {
+        guard let pm = session.permissionMode else { return nil }
+        switch pm {
+        case "bypassPermissions": return "Bypass"
+        case "default": return "Default"
+        case "plan": return "Plan"
+        default: return pm.prefix(1).uppercased() + pm.dropFirst()
         }
-        if count >= 1_000 {
-            return String(format: "%.0fK", Double(count) / 1_000)
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        if seconds >= 86400 {
+            let d = seconds / 86400
+            let h = (seconds % 86400) / 3600
+            return "\(d)d \(h)h"
         }
-        return "\(count)"
+        if seconds >= 3600 {
+            let h = seconds / 3600
+            let m = (seconds % 3600) / 60
+            return "\(h)h \(m)m"
+        }
+        let m = seconds / 60
+        return "\(m)m"
+    }
+
+    private func formatDurationMs(_ ms: Int64) -> String {
+        let seconds = Int(ms / 1000)
+        if seconds >= 3600 {
+            return String(format: "%.1fh", Double(ms) / 3_600_000)
+        }
+        if seconds >= 60 {
+            return String(format: "%.0fm", Double(ms) / 60_000)
+        }
+        return "\(seconds)s"
+    }
+
+    private func formatMemory(_ mb: Double) -> String {
+        if mb >= 1024 {
+            return String(format: "%.1f GB", mb / 1024)
+        }
+        return String(format: "%.0f MB", mb)
     }
 
     var body: some View {
@@ -28,7 +73,8 @@ struct SessionRow: View {
                 .frame(width: 8, height: 8)
                 .padding(.top, 5)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 4) {
+                // Row 1: project name + time ago
                 HStack {
                     Text(session.projectName)
                         .font(.callout)
@@ -44,23 +90,29 @@ struct SessionRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
+                // Row 2: model + permission
                 HStack(spacing: 8) {
+                    if let model = modelShort {
+                        Label(model, systemImage: "cpu")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let perm = permissionLabel {
+                        Label(perm, systemImage: "lock.shield")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     if let branch = session.gitBranch {
                         Label(branch, systemImage: "arrow.triangle.branch")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                }
+
+                // Row 3: messages, subagents, turn time
+                HStack(spacing: 8) {
                     if session.userMessages > 0 {
                         Label("\(session.userMessages)", systemImage: "text.bubble")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    } else if session.messageCount > 0 {
-                        Label("\(session.messageCount)", systemImage: "text.bubble")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    if session.toolCalls > 0 {
-                        Label("\(session.toolCalls)", systemImage: "wrench")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -69,14 +121,23 @@ struct SessionRow: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
+                    if session.totalDurationMs > 0 {
+                        Label(formatDurationMs(session.totalDurationMs), systemImage: "clock")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                if session.tokensIn > 0 || session.tokensOut > 0 {
+                // Row 4: process stats (only for active processes)
+                if isActive && session.elapsedSeconds > 0 {
                     HStack(spacing: 8) {
-                        Label("\(formatTokens(session.tokensIn)) in", systemImage: "arrow.down")
+                        Label(formatDuration(session.elapsedSeconds), systemImage: "timer")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Label("\(formatTokens(session.tokensOut)) out", systemImage: "arrow.up")
+                        Label(formatMemory(session.memoryMB), systemImage: "memorychip")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Label(String(format: "%.0f%%", session.cpuPercent), systemImage: "gauge.medium")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
@@ -91,7 +152,7 @@ struct SessionCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Active Sessions")
+            Text("Sessions")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
@@ -106,7 +167,7 @@ struct SessionCard: View {
                 ForEach(Array(sessions.prefix(5))) { session in
                     SessionRow(
                         session: session,
-                        isActive: session.modifiedDate.map { $0.timeIntervalSinceNow > -300 } ?? false
+                        isActive: session.elapsedSeconds > 0
                     )
                     if session.id != sessions.prefix(5).last?.id {
                         Divider().opacity(0.3)
