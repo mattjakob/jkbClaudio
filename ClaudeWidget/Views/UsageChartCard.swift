@@ -59,31 +59,7 @@ struct UsageChartCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("\(Int(currentUtilization))%")
-                    .font(.system(size: 28, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(chartColor)
-
-                Text(range.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                if isLoading {
-                    ProgressView()
-                        .scaleEffect(0.5)
-                }
-
-                if !resetText.isEmpty {
-                    Text(resetText)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-            }
-
+        Group {
             if filteredReadings.count >= 2 {
                 chart
             } else {

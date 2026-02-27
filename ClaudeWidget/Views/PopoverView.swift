@@ -32,7 +32,9 @@ struct PopoverView: View {
     private var usageSection: some View {
         UsageCard(
             fiveHourUtilization: viewModel.fiveHourUtilization,
-            fiveHourResetsAt: viewModel.fiveHourResetsAt
+            fiveHourResetsAt: viewModel.fiveHourResetsAt,
+            weeklyUtilization: viewModel.weeklyUtilization,
+            weeklyResetsAt: viewModel.weeklyResetsAt
         )
     }
 
