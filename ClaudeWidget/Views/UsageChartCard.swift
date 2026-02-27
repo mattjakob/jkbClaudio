@@ -44,9 +44,7 @@ struct UsageChartCard: View {
 
     private var resetText: String {
         guard let resetsAt else { return "" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return "Resets \(formatter.localizedString(for: resetsAt, relativeTo: .now))"
+        return "Resets \(formatReset(resetsAt))"
     }
 
     private var domainStart: Date {

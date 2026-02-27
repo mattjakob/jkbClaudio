@@ -1,5 +1,26 @@
 import SwiftUI
 
+func formatReset(_ date: Date) -> String {
+    let seconds = date.timeIntervalSinceNow
+    guard seconds > 0 else { return "now" }
+    if seconds < 48 * 3600 {
+        let h = Int(seconds) / 3600
+        let m = (Int(seconds) % 3600) / 60
+        if h >= 24 {
+            let d = h / 24
+            let rh = h % 24
+            return "in \(d)d \(rh)h"
+        }
+        if h > 0 {
+            return "in \(h)h \(m)m"
+        }
+        return "in \(m)m"
+    }
+    let formatter = RelativeDateTimeFormatter()
+    formatter.unitsStyle = .abbreviated
+    return formatter.localizedString(for: date, relativeTo: .now)
+}
+
 struct UsageBar: View {
     let label: String
     let utilization: Double
@@ -13,9 +34,7 @@ struct UsageBar: View {
 
     private var resetText: String {
         guard let resetsAt else { return "—" }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: resetsAt, relativeTo: .now)
+        return formatReset(resetsAt)
     }
 
     var body: some View {
@@ -44,14 +63,9 @@ struct UsageBar: View {
             }
             .frame(height: 6)
 
-            HStack {
-                Text("Resets")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                Text(resetText)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
+            Text("Resets \(resetText)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
     }
 }
