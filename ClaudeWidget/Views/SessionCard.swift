@@ -81,12 +81,12 @@ struct SessionRow: View {
             // Row 2: model + permission + branch
             HStack(spacing: 8) {
                 if let model = modelShort {
-                    Label(model, systemImage: "cpu")
+                    Label(model, systemImage: "terminal")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
                 if let perm = permissionLabel {
-                    Label(perm, systemImage: "lock.shield")
+                    Label(perm, systemImage: "shield.lefthalf.filled")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -100,11 +100,11 @@ struct SessionRow: View {
             // Row 3: subagents/terminal + turn time
             HStack(spacing: 8) {
                 if session.subagentCount > 0 {
-                    Label("\(session.subagentCount)", systemImage: "person.2")
+                    Label("\(session.subagentCount)", systemImage: "sparkles.square.filled.on.square")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
-                    Label("1", systemImage: "terminal")
+                    Label("1", systemImage: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -124,7 +124,7 @@ struct SessionRow: View {
                     Label(formatMemory(session.memoryMB), systemImage: "memorychip")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                    Label(String(format: "%.0f%%", session.cpuPercent), systemImage: "gauge.medium")
+                    Label(String(format: "%.0f%%", session.cpuPercent), systemImage: "gauge.low")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
