@@ -2,13 +2,17 @@ import SwiftUI
 
 @main
 struct ClaudeWidgetApp: App {
+    @State private var viewModel = AppViewModel()
+
     var body: some Scene {
         MenuBarExtra {
-            Text("ClaudeWidget placeholder")
-                .frame(width: 320, height: 200)
-                .padding()
+            PopoverView(viewModel: viewModel)
+                .frame(width: 320, height: 520)
         } label: {
-            Label("Claude", systemImage: "terminal.fill")
+            MenuBarLabel(
+                utilization: viewModel.weeklyUtilization,
+                isConnected: viewModel.isConnected
+            )
         }
         .menuBarExtraStyle(.window)
     }
