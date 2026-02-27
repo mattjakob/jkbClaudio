@@ -117,7 +117,8 @@ actor SessionService {
         var userMsgs = 0
         var assistantTurns = 0
         var toolCalls = 0
-        var subagents = 0
+        var taskToolUseIds: Set<String> = []
+        var completedTaskIds: Set<String> = []
         var tokensIn: Int64 = 0
         var tokensOut: Int64 = 0
         var totalDurationMs: Int64 = 0
@@ -141,10 +142,19 @@ actor SessionService {
                 if permissionMode == nil, let pm = obj["permissionMode"] as? String {
                     permissionMode = pm
                 }
-                if firstPrompt == nil,
-                   let msg = obj["message"] as? [String: Any],
-                   let content = msg["content"] as? String {
-                    firstPrompt = String(content.prefix(80))
+                if let msg = obj["message"] as? [String: Any] {
+                    if firstPrompt == nil, let content = msg["content"] as? String {
+                        firstPrompt = String(content.prefix(80))
+                    }
+                    if let content = msg["content"] as? [[String: Any]] {
+                        for block in content {
+                            if block["type"] as? String == "tool_result",
+                               let toolUseId = block["tool_use_id"] as? String,
+                               taskToolUseIds.contains(toolUseId) {
+                                completedTaskIds.insert(toolUseId)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -165,7 +175,9 @@ actor SessionService {
                                 toolCalls += 1
                                 let name = block["name"] as? String ?? "unknown"
                                 tools[name, default: 0] += 1
-                                if name == "Task" { subagents += 1 }
+                                if name == "Task", let id = block["id"] as? String {
+                                    taskToolUseIds.insert(id)
+                                }
                             }
                         }
                     }
@@ -184,7 +196,7 @@ actor SessionService {
         session.userMessages = userMsgs
         session.assistantTurns = assistantTurns
         session.toolCalls = toolCalls
-        session.subagentCount = subagents
+        session.subagentCount = taskToolUseIds.count - completedTaskIds.count
         session.tokensIn = tokensIn
         session.tokensOut = tokensOut
         session.topTools = tools
