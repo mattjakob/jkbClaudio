@@ -47,7 +47,7 @@ struct UsageChartCard: View {
     var body: some View {
         let end = (range == .sevenDay ? weeklyResetsAt : fiveHourResetsAt) ?? Date()
         let start = end.addingTimeInterval(-range.duration)
-        let filtered = readings.filter { $0.timestamp >= start && $0.timestamp <= end }
+        let filtered = chartReadings(from: readings, start: start, end: end)
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -91,6 +91,15 @@ struct UsageChartCard: View {
                 NSCursor.pop()
             }
         }
+    }
+
+    private func chartReadings(from readings: [UsageReading], start: Date, end: Date) -> [UsageReading] {
+        let filtered = readings.filter { $0.timestamp >= start && $0.timestamp <= end }
+        if filtered.count == 1, let only = filtered.first {
+            let synthetic = UsageReading(timestamp: start, weekly: only.weekly, fiveHour: only.fiveHour)
+            return [synthetic] + filtered
+        }
+        return filtered
     }
 
     private func projectionEndValue(filtered: [UsageReading], start: Date, end: Date) -> Double? {
