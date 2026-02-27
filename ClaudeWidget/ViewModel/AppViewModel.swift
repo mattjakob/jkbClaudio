@@ -19,6 +19,8 @@ final class AppViewModel {
 
     private let usageService = UsageService()
     private let sessionService = SessionService()
+    private let otelReceiver = OTelReceiver()
+    var otelConnected = false
     private var pollTimer: Timer?
 
     var menuBarText: String {
@@ -39,11 +41,21 @@ final class AppViewModel {
             guard let self else { return }
             Task { @MainActor in await self.refresh() }
         }
+
+        Task {
+            do {
+                try await otelReceiver.start()
+                otelConnected = true
+            } catch {
+                otelConnected = false
+            }
+        }
     }
 
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        Task { await otelReceiver.stop() }
     }
 
     func refresh() async {
