@@ -61,20 +61,23 @@ struct UsageCard: View {
     let fiveHourResetsAt: Date?
     let weeklyUtilization: Double
     let weeklyResetsAt: Date?
+    let chartRange: ChartRange
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            UsageBar(
-                label: "5-Hour",
-                utilization: fiveHourUtilization,
-                resetsAt: fiveHourResetsAt
-            )
-
-            UsageBar(
-                label: "Weekly",
-                utilization: weeklyUtilization,
-                resetsAt: weeklyResetsAt
-            )
+            if chartRange == .sevenDay {
+                UsageBar(
+                    label: "5-Hour",
+                    utilization: fiveHourUtilization,
+                    resetsAt: fiveHourResetsAt
+                )
+            } else {
+                UsageBar(
+                    label: "Weekly",
+                    utilization: weeklyUtilization,
+                    resetsAt: weeklyResetsAt
+                )
+            }
         }
         .padding(14)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))

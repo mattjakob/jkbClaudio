@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PopoverView: View {
     let viewModel: AppViewModel
+    @State private var chartRange: ChartRange = .sevenDay
 
     var body: some View {
         ScrollView {
@@ -24,8 +25,9 @@ struct PopoverView: View {
             readings: viewModel.usageHistory,
             weeklyUtilization: viewModel.weeklyUtilization,
             fiveHourUtilization: viewModel.fiveHourUtilization,
-            resetsAt: viewModel.weeklyResetsAt,
-            isLoading: viewModel.isLoading
+            weeklyResetsAt: viewModel.weeklyResetsAt,
+            fiveHourResetsAt: viewModel.fiveHourResetsAt,
+            range: $chartRange
         )
     }
 
@@ -34,7 +36,8 @@ struct PopoverView: View {
             fiveHourUtilization: viewModel.fiveHourUtilization,
             fiveHourResetsAt: viewModel.fiveHourResetsAt,
             weeklyUtilization: viewModel.weeklyUtilization,
-            weeklyResetsAt: viewModel.weeklyResetsAt
+            weeklyResetsAt: viewModel.weeklyResetsAt,
+            chartRange: chartRange
         )
     }
 

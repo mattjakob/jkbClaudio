@@ -7,8 +7,8 @@ enum ChartRange {
 
     var label: String {
         switch self {
-        case .sevenDay: "weekly"
-        case .fiveHour: "5-hour"
+        case .sevenDay: "Weekly"
+        case .fiveHour: "5-Hour"
         }
     }
 
@@ -24,19 +24,19 @@ struct UsageChartCard: View {
     let readings: [UsageReading]
     let weeklyUtilization: Double
     let fiveHourUtilization: Double
-    let resetsAt: Date?
-    let isLoading: Bool
-
-    @State private var range: ChartRange = .sevenDay
+    let weeklyResetsAt: Date?
+    let fiveHourResetsAt: Date?
+    @Binding var range: ChartRange
 
     private var currentUtilization: Double {
-        switch range {
-        case .sevenDay: weeklyUtilization
-        case .fiveHour: fiveHourUtilization
-        }
+        range == .sevenDay ? weeklyUtilization : fiveHourUtilization
     }
 
-    private var chartColor: Color {
+    private var resetsAt: Date? {
+        range == .sevenDay ? weeklyResetsAt : fiveHourResetsAt
+    }
+
+    private var barColor: Color {
         if currentUtilization >= 80 { return .red }
         if currentUtilization >= 60 { return .yellow }
         return .white
@@ -46,7 +46,7 @@ struct UsageChartCard: View {
         guard let resetsAt else { return "" }
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
-        return "resets \(formatter.localizedString(for: resetsAt, relativeTo: .now))"
+        return "Resets \(formatter.localizedString(for: resetsAt, relativeTo: .now))"
     }
 
     private var domainStart: Date {
@@ -59,7 +59,18 @@ struct UsageChartCard: View {
     }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(range.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(Int(currentUtilization))%")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(barColor)
+            }
+
             if filteredReadings.count >= 2 {
                 chart
             } else {
@@ -68,6 +79,12 @@ struct UsageChartCard: View {
                     .foregroundStyle(.tertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .frame(height: 80)
+            }
+
+            HStack {
+                Text(resetText)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(14)
@@ -90,7 +107,7 @@ struct UsageChartCard: View {
                 )
                 .foregroundStyle(
                     .linearGradient(
-                        colors: [chartColor.opacity(0.3), chartColor.opacity(0.02)],
+                        colors: [barColor.opacity(0.3), barColor.opacity(0.02)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
@@ -101,14 +118,14 @@ struct UsageChartCard: View {
                     x: .value("Time", reading.timestamp),
                     y: .value("Usage", value)
                 )
-                .foregroundStyle(chartColor.opacity(0.8))
+                .foregroundStyle(barColor.opacity(0.8))
                 .lineStyle(StrokeStyle(lineWidth: 1.5))
                 .interpolationMethod(.catmullRom)
             }
         }
         .chartXScale(domain: domainStart...Date())
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 6)) { value in
+            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 5)) { value in
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
                         if range == .sevenDay {
