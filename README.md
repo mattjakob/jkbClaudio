@@ -16,7 +16,7 @@ It reads your existing Claude Code OAuth credentials (no separate login required
 
 ## Install
 
-Download [`Claudio.dmg`](Claudio.dmg), open it, and drag Claudio to Applications.
+Download [`Claudio.dmg`](https://github.com/mattjakob/jkbClaudio/releases/latest/download/Claudio.dmg), open it, and drag Claudio to Applications.
 
 ## Tech Stack
 
