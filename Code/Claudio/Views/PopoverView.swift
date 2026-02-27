@@ -3,8 +3,19 @@ import SwiftUI
 struct PopoverView: View {
     @Bindable var viewModel: AppViewModel
     @State private var scrollID: Bool?
+    @State private var showSettings = false
 
     var body: some View {
+        if showSettings {
+            BridgeSettingsView(bridge: viewModel.bridge) {
+                showSettings = false
+            }
+        } else {
+            mainView
+        }
+    }
+
+    private var mainView: some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 12) {
@@ -16,7 +27,6 @@ struct PopoverView: View {
                         extraUsageSection
                     }
                     sessionsSection
-                    BridgeSettingsView(bridge: viewModel.bridge)
                     footerSection
                 }
                 .padding(16)
@@ -79,6 +89,14 @@ struct PopoverView: View {
             .controlSize(.small)
 
             Spacer()
+
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
 
             Button("Quit") {
                 NSApplication.shared.terminate(nil)

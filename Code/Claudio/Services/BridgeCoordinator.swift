@@ -69,9 +69,13 @@ final class BridgeCoordinator {
         isConnected = false
     }
 
-    func saveBotToken(_ token: String) {
+    func saveBotToken(_ token: String) async {
         botToken = token
         UserDefaults.standard.set(token, forKey: Self.tokenKey)
+        if isEnabled {
+            await stop()
+            await start()
+        }
     }
 
     func setEnabled(_ enabled: Bool) async {
