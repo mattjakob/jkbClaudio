@@ -13,12 +13,15 @@ final class AppViewModel {
     var activeSessions: [SessionEntry] = []
     var weeklyStats = WeeklyStats()
 
+    var usageHistory: [UsageReading] = []
+
     var isConnected = false
     var lastError: String?
     var isLoading = false
 
     private let usageService = UsageService()
     private let sessionService = SessionService()
+    private let historyService = UsageHistoryService()
     private let otelReceiver = OTelReceiver()
     var otelConnected = false
     private var pollTimer: Timer?
@@ -35,7 +38,11 @@ final class AppViewModel {
     }
 
     func startPolling() {
-        Task { await refresh() }
+        Task {
+            await historyService.load()
+            usageHistory = await historyService.getReadings()
+            await refresh()
+        }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -71,6 +78,9 @@ final class AppViewModel {
             opusUtilization = usage.sevenDayOpus?.utilization ?? 0
             isConnected = true
             lastError = nil
+
+            await historyService.record(weekly: weeklyUtilization, fiveHour: fiveHourUtilization)
+            usageHistory = await historyService.getReadings()
         } catch {
             isConnected = false
             lastError = error.localizedDescription
