@@ -11,17 +11,33 @@ actor SessionService {
     }
 
     func getActiveSessions() -> [SessionEntry] {
-        let activePIDs = getClaudeProcessSessionIds()
+        let activeProjectPaths = getClaudeProcessPaths()
         let allSessions = loadAllSessions()
             .sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
 
-        // Mark running processes as active; also include recent sessions (last 24h)
-        let cutoff = Date().addingTimeInterval(-86400)
-        return allSessions.filter { session in
-            let isRunning = activePIDs.contains(session.sessionId)
-            let isRecent = session.modifiedDate.map { $0 > cutoff } ?? false
-            return isRunning || isRecent
+        // For each active claude process CWD, find the most recent session whose projectPath matches
+        var activeSessions: [SessionEntry] = []
+        var seenProjects = Set<String>()
+
+        for session in allSessions {
+            let isRunning = activeProjectPaths.contains { session.projectPath.hasPrefix($0) || $0.hasPrefix(session.projectPath) }
+            if isRunning && !seenProjects.contains(session.projectPath) {
+                seenProjects.insert(session.projectPath)
+                activeSessions.append(session)
+            }
         }
+
+        // Also include recent non-running sessions (last 24h)
+        let cutoff = Date().addingTimeInterval(-86400)
+        for session in allSessions {
+            if !seenProjects.contains(session.projectPath),
+               let modified = session.modifiedDate, modified > cutoff {
+                seenProjects.insert(session.projectPath)
+                activeSessions.append(session)
+            }
+        }
+
+        return activeSessions
     }
 
     func getWeeklyStats() -> WeeklyStats {
@@ -77,33 +93,44 @@ actor SessionService {
         return try? JSONDecoder().decode(StatsCache.self, from: data)
     }
 
-    private nonisolated func getClaudeProcessSessionIds() -> Set<String> {
-        let pipe = Pipe()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        process.arguments = ["-fl", "claude"]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
+    private nonisolated func getClaudeProcessPaths() -> Set<String> {
+        // Get PIDs of running claude processes
+        let pgrepPipe = Pipe()
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-x", "claude"]
+        pgrep.standardOutput = pgrepPipe
+        pgrep.standardError = FileHandle.nullDevice
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return []
-        }
+        do { try pgrep.run(); pgrep.waitUntilExit() } catch { return [] }
 
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+        let pgrepData = pgrepPipe.fileHandleForReading.readDataToEndOfFile()
+        let pids = String(data: pgrepData, encoding: .utf8)?
+            .components(separatedBy: "\n")
+            .compactMap { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty } ?? []
 
-        var sessionIds = Set<String>()
-        for line in output.components(separatedBy: "\n") {
-            if let range = line.range(of: "--session-id\\s+([a-f0-9-]+)", options: .regularExpression) {
-                let match = line[range]
-                if let idRange = match.range(of: "[a-f0-9-]{36}", options: .regularExpression) {
-                    sessionIds.insert(String(match[idRange]))
-                }
+        guard !pids.isEmpty else { return [] }
+
+        // Use lsof to get the CWD of each claude process
+        let lsofPipe = Pipe()
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-a", "-d", "cwd", "-p", pids.joined(separator: ",")] + ["-Fn"]
+        lsof.standardOutput = lsofPipe
+        lsof.standardError = FileHandle.nullDevice
+
+        do { try lsof.run(); lsof.waitUntilExit() } catch { return [] }
+
+        let lsofData = lsofPipe.fileHandleForReading.readDataToEndOfFile()
+        let lsofOutput = String(data: lsofData, encoding: .utf8) ?? ""
+
+        var paths = Set<String>()
+        for line in lsofOutput.components(separatedBy: "\n") {
+            if line.hasPrefix("n/") {
+                paths.insert(String(line.dropFirst(1)))
             }
         }
-        return sessionIds
+        return paths
     }
 }
