@@ -1,5 +1,21 @@
 import SwiftUI
 
+struct BiLabel: View {
+    let text: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(icon, bundle: .module)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 10, height: 10)
+            Text(text)
+        }
+    }
+}
+
 struct SessionRow: View {
     let session: SessionEntry
     let isActive: Bool
@@ -13,8 +29,6 @@ struct SessionRow: View {
 
     private var modelShort: String? {
         guard let model = session.model else { return nil }
-        // claude-opus-4-6 -> Opus 4.6
-        // claude-sonnet-4-6 -> Sonnet 4.6
         let parts = model.replacingOccurrences(of: "claude-", with: "")
             .components(separatedBy: "-")
         guard parts.count >= 2 else { return model }
@@ -90,39 +104,38 @@ struct SessionRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                // Row 2: model + permission
+                // Row 2: model + permission + branch
                 HStack(spacing: 8) {
                     if let model = modelShort {
-                        Label(model, systemImage: "cpu")
+                        BiLabel(text: model, icon: "bi-cpu")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     if let perm = permissionLabel {
-                        Label(perm, systemImage: "lock.shield")
+                        BiLabel(text: perm, icon: "bi-shield-lock")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     if let branch = session.gitBranch {
-                        Label(branch, systemImage: "arrow.triangle.branch")
+                        BiLabel(text: branch, icon: "bi-diagram-3")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                // Row 3: messages, subagents, turn time
+                // Row 3: subagents/terminal + turn time
                 HStack(spacing: 8) {
-                    if session.userMessages > 0 {
-                        Label("\(session.userMessages)", systemImage: "text.bubble")
+                    if session.subagentCount > 0 {
+                        BiLabel(text: "\(session.subagentCount)", icon: "bi-people")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                    }
-                    if session.subagentCount > 0 {
-                        Label("\(session.subagentCount)", systemImage: "person.2")
+                    } else {
+                        BiLabel(text: "1", icon: "bi-terminal-plus")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     if session.totalDurationMs > 0 {
-                        Label(formatDurationMs(session.totalDurationMs), systemImage: "clock")
+                        BiLabel(text: formatDurationMs(session.totalDurationMs), icon: "bi-hourglass-split")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -131,13 +144,13 @@ struct SessionRow: View {
                 // Row 4: process stats (only for active processes)
                 if isActive && session.elapsedSeconds > 0 {
                     HStack(spacing: 8) {
-                        Label(formatDuration(session.elapsedSeconds), systemImage: "timer")
+                        BiLabel(text: formatDuration(session.elapsedSeconds), icon: "bi-stopwatch")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Label(formatMemory(session.memoryMB), systemImage: "memorychip")
+                        BiLabel(text: formatMemory(session.memoryMB), icon: "bi-memory")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
-                        Label(String(format: "%.0f%%", session.cpuPercent), systemImage: "gauge.medium")
+                        BiLabel(text: String(format: "%.0f%%", session.cpuPercent), icon: "bi-speedometer2")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
