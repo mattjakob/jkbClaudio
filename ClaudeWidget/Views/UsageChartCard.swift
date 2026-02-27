@@ -1,11 +1,40 @@
 import Charts
 import SwiftUI
 
+enum ChartRange {
+    case sevenDay
+    case sixHour
+
+    var label: String {
+        switch self {
+        case .sevenDay: "weekly"
+        case .sixHour: "5-hour"
+        }
+    }
+
+    var duration: TimeInterval {
+        switch self {
+        case .sevenDay: 7 * 86400
+        case .sixHour: 6 * 3600
+        }
+    }
+}
+
 struct UsageChartCard: View {
     let readings: [UsageReading]
-    let currentUtilization: Double
+    let weeklyUtilization: Double
+    let fiveHourUtilization: Double
     let resetsAt: Date?
     let isLoading: Bool
+
+    @State private var range: ChartRange = .sevenDay
+
+    private var currentUtilization: Double {
+        switch range {
+        case .sevenDay: weeklyUtilization
+        case .sixHour: fiveHourUtilization
+        }
+    }
 
     private var chartColor: Color {
         if currentUtilization >= 80 { return .red }
@@ -20,12 +49,13 @@ struct UsageChartCard: View {
         return "resets \(formatter.localizedString(for: resetsAt, relativeTo: .now))"
     }
 
-    private var dayLabels: [Date] {
-        let calendar = Calendar.current
-        let now = Date()
-        return (0..<7).reversed().compactMap {
-            calendar.date(byAdding: .day, value: -$0, to: now)
-        }
+    private var domainStart: Date {
+        Date().addingTimeInterval(-range.duration)
+    }
+
+    private var filteredReadings: [UsageReading] {
+        let start = domainStart
+        return readings.filter { $0.timestamp >= start }
     }
 
     var body: some View {
@@ -36,7 +66,7 @@ struct UsageChartCard: View {
                     .monospacedDigit()
                     .foregroundStyle(chartColor)
 
-                Text("weekly")
+                Text(range.label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -54,57 +84,8 @@ struct UsageChartCard: View {
                 }
             }
 
-            if readings.count >= 2 {
-                Chart {
-                    ForEach(Array(readings.enumerated()), id: \.offset) { _, reading in
-                        AreaMark(
-                            x: .value("Time", reading.timestamp),
-                            y: .value("Usage", reading.weekly)
-                        )
-                        .foregroundStyle(
-                            .linearGradient(
-                                colors: [chartColor.opacity(0.3), chartColor.opacity(0.02)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .interpolationMethod(.catmullRom)
-
-                        LineMark(
-                            x: .value("Time", reading.timestamp),
-                            y: .value("Usage", reading.weekly)
-                        )
-                        .foregroundStyle(chartColor.opacity(0.8))
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
-                        .interpolationMethod(.catmullRom)
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: dayLabels) { value in
-                        AxisValueLabel {
-                            if let date = value.as(Date.self) {
-                                Text(date, format: .dateTime.weekday(.abbreviated))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                }
-                .chartYAxis {
-                    AxisMarks(values: [0, 50, 100]) { value in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
-                            .foregroundStyle(.white.opacity(0.1))
-                        AxisValueLabel {
-                            if let v = value.as(Int.self) {
-                                Text("\(v)")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                }
-                .chartYScale(domain: 0...100)
-                .frame(height: 80)
+            if filteredReadings.count >= 2 {
+                chart
             } else {
                 Text("Collecting usage data...")
                     .font(.caption2)
@@ -115,5 +96,72 @@ struct UsageChartCard: View {
         }
         .padding(14)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                range = range == .sevenDay ? .sixHour : .sevenDay
+            }
+        }
+    }
+
+    private var chart: some View {
+        Chart {
+            ForEach(Array(filteredReadings.enumerated()), id: \.offset) { _, reading in
+                let value = range == .sevenDay ? reading.weekly : reading.fiveHour
+
+                AreaMark(
+                    x: .value("Time", reading.timestamp),
+                    y: .value("Usage", value)
+                )
+                .foregroundStyle(
+                    .linearGradient(
+                        colors: [chartColor.opacity(0.3), chartColor.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .interpolationMethod(.catmullRom)
+
+                LineMark(
+                    x: .value("Time", reading.timestamp),
+                    y: .value("Usage", value)
+                )
+                .foregroundStyle(chartColor.opacity(0.8))
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                .interpolationMethod(.catmullRom)
+            }
+        }
+        .chartXScale(domain: domainStart...Date())
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: range == .sevenDay ? 7 : 6)) { value in
+                AxisValueLabel {
+                    if let date = value.as(Date.self) {
+                        if range == .sevenDay {
+                            Text(date, format: .dateTime.weekday(.abbreviated))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            Text(date, format: .dateTime.hour())
+                                .font(.system(size: 9))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(values: [0, 50, 100]) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
+                    .foregroundStyle(.white.opacity(0.1))
+                AxisValueLabel {
+                    if let v = value.as(Int.self) {
+                        Text("\(v)")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .chartYScale(domain: 0...100)
+        .frame(height: 80)
     }
 }

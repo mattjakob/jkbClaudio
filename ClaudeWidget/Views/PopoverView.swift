@@ -22,7 +22,8 @@ struct PopoverView: View {
     private var chartSection: some View {
         UsageChartCard(
             readings: viewModel.usageHistory,
-            currentUtilization: viewModel.weeklyUtilization,
+            weeklyUtilization: viewModel.weeklyUtilization,
+            fiveHourUtilization: viewModel.fiveHourUtilization,
             resetsAt: viewModel.weeklyResetsAt,
             isLoading: viewModel.isLoading
         )
