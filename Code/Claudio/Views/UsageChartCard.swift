@@ -149,7 +149,7 @@ struct UsageChartCard: View {
 
                 LineMark(
                     x: .value("Time", end),
-                    y: .value("Usage", min(projEnd, 100)),
+                    y: .value("Usage", projEnd),
                     series: .value("S", "proj")
                 )
                 .foregroundStyle(projColor.opacity(0.6))
@@ -176,7 +176,11 @@ struct UsageChartCard: View {
             }
         }
         .chartYAxis {
-            AxisMarks(values: [0, 50, 100]) { value in
+            let yMax = max(projEnd ?? 100, 100)
+            let ticks: [Int] = yMax > 100
+                ? [0, 50, 100, Int(ceil(yMax / 10) * 10)]
+                : [0, 50, 100]
+            AxisMarks(values: ticks) { value in
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
                     .foregroundStyle(.white.opacity(0.1))
                 AxisValueLabel {
@@ -188,7 +192,7 @@ struct UsageChartCard: View {
                 }
             }
         }
-        .chartYScale(domain: 0...100)
+        .chartYScale(domain: 0...max(projEnd ?? 100, 100))
         .frame(height: 80)
     }
 }
