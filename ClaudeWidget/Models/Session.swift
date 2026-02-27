@@ -13,18 +13,37 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     let projectPath: String
     let isSidechain: Bool
 
+    // Rich stats (parsed from .jsonl when available)
+    var userMessages: Int = 0
+    var assistantTurns: Int = 0
+    var toolCalls: Int = 0
+    var subagentCount: Int = 0
+    var tokensIn: Int64 = 0
+    var tokensOut: Int64 = 0
+    var model: String?
+    var topTools: [String: Int] = [:]
+
     var id: String { sessionId }
 
     var createdDate: Date? {
-        ISO8601DateFormatter().date(from: created)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fmt.date(from: created) ?? ISO8601DateFormatter().date(from: created)
     }
 
     var modifiedDate: Date? {
-        ISO8601DateFormatter().date(from: modified)
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fmt.date(from: modified) ?? ISO8601DateFormatter().date(from: modified)
     }
 
     var projectName: String {
         projectPath.components(separatedBy: "/").last ?? projectPath
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionId, fullPath, fileMtime, firstPrompt, summary, messageCount
+        case created, modified, gitBranch, projectPath, isSidechain
     }
 }
 

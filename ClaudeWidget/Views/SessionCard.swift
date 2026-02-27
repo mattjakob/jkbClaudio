@@ -11,6 +11,16 @@ struct SessionRow: View {
         return formatter.localizedString(for: modified, relativeTo: .now)
     }
 
+    private func formatTokens(_ count: Int64) -> String {
+        if count >= 1_000_000 {
+            return String(format: "%.1fM", Double(count) / 1_000_000)
+        }
+        if count >= 1_000 {
+            return String(format: "%.0fK", Double(count) / 1_000)
+        }
+        return "\(count)"
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Circle()
@@ -28,24 +38,50 @@ struct SessionRow: View {
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                     }
-                }
-
-                HStack(spacing: 8) {
-                    if let branch = session.gitBranch {
-                        Text(branch)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("\(session.messageCount) msgs")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Spacer()
                     Text(timeAgo)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
-            }
 
-            Spacer()
+                HStack(spacing: 8) {
+                    if let branch = session.gitBranch {
+                        Label(branch, systemImage: "arrow.triangle.branch")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if session.userMessages > 0 {
+                        Label("\(session.userMessages)", systemImage: "text.bubble")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if session.messageCount > 0 {
+                        Label("\(session.messageCount)", systemImage: "text.bubble")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if session.toolCalls > 0 {
+                        Label("\(session.toolCalls)", systemImage: "wrench")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    if session.subagentCount > 0 {
+                        Label("\(session.subagentCount)", systemImage: "person.2")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if session.tokensIn > 0 || session.tokensOut > 0 {
+                    HStack(spacing: 8) {
+                        Label("\(formatTokens(session.tokensIn)) in", systemImage: "arrow.down")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Label("\(formatTokens(session.tokensOut)) out", systemImage: "arrow.up")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
         }
     }
 }
@@ -72,6 +108,9 @@ struct SessionCard: View {
                         session: session,
                         isActive: session.modifiedDate.map { $0.timeIntervalSinceNow > -300 } ?? false
                     )
+                    if session.id != sessions.prefix(5).last?.id {
+                        Divider().opacity(0.3)
+                    }
                 }
             }
         }

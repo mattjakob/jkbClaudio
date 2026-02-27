@@ -16,7 +16,8 @@ actor SessionService {
 
         // For each running claude process, find or create a session entry
         for projectPath in activeProjectPaths {
-            if let session = findSessionForPath(projectPath) {
+            if var session = findSessionForPath(projectPath) {
+                enrichSession(&session)
                 results.append(session)
             }
         }
@@ -25,9 +26,10 @@ actor SessionService {
         let coveredPaths = Set(results.map(\.projectPath))
         let allIndexed = loadAllSessions()
         let cutoff = Date().addingTimeInterval(-86400)
-        for session in allIndexed {
+        for var session in allIndexed {
             if !coveredPaths.contains(session.projectPath),
                let modified = session.modifiedDate, modified > cutoff {
+                enrichSession(&session)
                 results.append(session)
             }
         }
@@ -92,7 +94,6 @@ actor SessionService {
         }
 
         // No session files found — create a minimal entry from the process info
-        let projectName = projectPath.components(separatedBy: "/").last ?? projectPath
         return SessionEntry(
             sessionId: UUID().uuidString,
             fullPath: "",
@@ -105,6 +106,107 @@ actor SessionService {
             gitBranch: nil,
             projectPath: projectPath,
             isSidechain: false
+        )
+    }
+
+    private func enrichSession(_ session: inout SessionEntry) {
+        guard !session.fullPath.isEmpty,
+              let data = FileManager.default.contents(atPath: session.fullPath) else { return }
+
+        let lines = data.split(separator: UInt8(ascii: "\n"))
+        var userMsgs = 0
+        var assistantTurns = 0
+        var toolCalls = 0
+        var subagents = 0
+        var tokensIn: Int64 = 0
+        var tokensOut: Int64 = 0
+        var tools: [String: Int] = [:]
+        var branch: String?
+        var model: String?
+        var firstPrompt: String?
+
+        for line in lines {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
+
+            let type = obj["type"] as? String ?? ""
+
+            if branch == nil, let b = obj["gitBranch"] as? String {
+                branch = b
+            }
+
+            if type == "user" {
+                userMsgs += 1
+                if firstPrompt == nil,
+                   let msg = obj["message"] as? [String: Any],
+                   let content = msg["content"] as? String {
+                    firstPrompt = String(content.prefix(80))
+                }
+            }
+
+            if type == "assistant" {
+                assistantTurns += 1
+                if let msg = obj["message"] as? [String: Any] {
+                    if model == nil, let m = msg["model"] as? String {
+                        model = m
+                    }
+                    if let usage = msg["usage"] as? [String: Any] {
+                        tokensIn += (usage["input_tokens"] as? Int64) ?? Int64(usage["input_tokens"] as? Int ?? 0)
+                        tokensIn += (usage["cache_read_input_tokens"] as? Int64) ?? Int64(usage["cache_read_input_tokens"] as? Int ?? 0)
+                        tokensOut += (usage["output_tokens"] as? Int64) ?? Int64(usage["output_tokens"] as? Int ?? 0)
+                    }
+                    if let content = msg["content"] as? [[String: Any]] {
+                        for block in content {
+                            if block["type"] as? String == "tool_use" {
+                                toolCalls += 1
+                                let name = block["name"] as? String ?? "unknown"
+                                tools[name, default: 0] += 1
+                                if name == "Task" { subagents += 1 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        session.userMessages = userMsgs
+        session.assistantTurns = assistantTurns
+        session.toolCalls = toolCalls
+        session.subagentCount = subagents
+        session.tokensIn = tokensIn
+        session.tokensOut = tokensOut
+        session.topTools = tools
+        if let branch { session = withBranch(session, branch) }
+        if let model { session.model = model }
+        if session.firstPrompt == nil, let firstPrompt { session = withFirstPrompt(session, firstPrompt) }
+    }
+
+    private func withBranch(_ s: SessionEntry, _ branch: String) -> SessionEntry {
+        var copy = s
+        // gitBranch is let, so we use a new entry
+        return SessionEntry(
+            sessionId: s.sessionId, fullPath: s.fullPath, fileMtime: s.fileMtime,
+            firstPrompt: s.firstPrompt, summary: s.summary,
+            messageCount: s.userMessages > 0 ? s.userMessages : s.messageCount,
+            created: s.created, modified: s.modified, gitBranch: branch,
+            projectPath: s.projectPath, isSidechain: s.isSidechain,
+            userMessages: s.userMessages, assistantTurns: s.assistantTurns,
+            toolCalls: s.toolCalls, subagentCount: s.subagentCount,
+            tokensIn: s.tokensIn, tokensOut: s.tokensOut,
+            model: s.model, topTools: s.topTools
+        )
+    }
+
+    private func withFirstPrompt(_ s: SessionEntry, _ prompt: String) -> SessionEntry {
+        return SessionEntry(
+            sessionId: s.sessionId, fullPath: s.fullPath, fileMtime: s.fileMtime,
+            firstPrompt: prompt, summary: s.summary,
+            messageCount: s.userMessages > 0 ? s.userMessages : s.messageCount,
+            created: s.created, modified: s.modified, gitBranch: s.gitBranch,
+            projectPath: s.projectPath, isSidechain: s.isSidechain,
+            userMessages: s.userMessages, assistantTurns: s.assistantTurns,
+            toolCalls: s.toolCalls, subagentCount: s.subagentCount,
+            tokensIn: s.tokensIn, tokensOut: s.tokensOut,
+            model: s.model, topTools: s.topTools
         )
     }
 
