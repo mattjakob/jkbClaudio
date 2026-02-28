@@ -25,7 +25,8 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     var permissionMode: String?
     var totalDurationMs: Int64 = 0
 
-    // Process-level stats (from ps)
+    // Process-level info
+    var pid: Int = 0
     var elapsedSeconds: Int = 0
     var memoryMB: Double = 0
     var cpuPercent: Double = 0

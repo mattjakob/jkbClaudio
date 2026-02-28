@@ -20,6 +20,10 @@ struct BridgeSettingsView: View {
                         // Fully configured — compact view
                         statusCard
                             .padding(.bottom, 12)
+                        helpCard(
+                            "Commands: /status, /run {project} {prompt}, /stop. Session output is forwarded automatically when hooks are installed."
+                        )
+                        .padding(.bottom, 12)
                     } else {
                         // Setup in progress — show guided steps
                         setupSection
@@ -41,6 +45,7 @@ struct BridgeSettingsView: View {
         }
         .onAppear {
             bridge.hooksInstalled = bridge.checkHooksInstalled()
+            Task { await bridge.validateConnection() }
         }
     }
 
@@ -148,20 +153,11 @@ struct BridgeSettingsView: View {
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 } else if bridge.isConnected {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
-                        Text("Connected")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if bridge.chatId > 0 {
-                            Spacer()
-                            Text("Chat \(bridge.chatId)")
-                                .font(.caption2)
-                                .foregroundStyle(.quaternary)
-                                .monospacedDigit()
-                        }
+                    if bridge.chatId > 0 {
+                        Text("Chat \(bridge.chatId)")
+                            .font(.caption2)
+                            .foregroundStyle(.quaternary)
+                            .monospacedDigit()
                     }
                 } else {
                     Text("Send any message to your bot on Telegram to link it.")
@@ -178,9 +174,16 @@ struct BridgeSettingsView: View {
                 done: bridge.hooksInstalled
             ) {
                 if bridge.hooksInstalled {
-                    Text("Installed in ~/.claude/settings.json")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    HStack {
+                        Text("Installed in ~/.claude/settings.json")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                        Button("Uninstall") { bridge.uninstallHooks() }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.red)
+                            .buttonStyle(.plain)
+                    }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Install hooks so Claude Code events are forwarded to Telegram.")
@@ -250,10 +253,23 @@ struct BridgeSettingsView: View {
             }
             rowDivider
             settingsRow("Hooks") {
-                Label("Installed", systemImage: "checkmark.circle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("Installed")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
             }
+            rowDivider
+            HStack {
+                Spacer()
+                Button("Uninstall Hooks") { bridge.uninstallHooks() }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                    .buttonStyle(.plain)
+                Spacer()
+            }
+            .padding(.vertical, 8)
         }
         .padding(.vertical, 4)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))

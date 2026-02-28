@@ -90,6 +90,19 @@ struct TGInlineKeyboardButton: Codable, Sendable {
     }
 }
 
+struct TGBotCommand: Codable, Sendable {
+    let command: String
+    let description: String
+}
+
+struct TGSetMyCommands: Codable, Sendable {
+    let commands: [TGBotCommand]
+}
+
+struct TGSetMyDescription: Codable, Sendable {
+    let description: String
+}
+
 struct TGEditMessageReplyMarkup: Codable, Sendable {
     let chatId: Int
     let messageId: Int

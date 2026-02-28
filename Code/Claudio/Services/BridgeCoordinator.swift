@@ -15,6 +15,17 @@ final class BridgeCoordinator {
     private let sessionWatcher = SessionWatcher()
     private let remoteManager = RemoteSessionManager()
 
+    private var sessionSlots: [SessionSlot] = []
+    private var nextSlotNumber: Int = 1
+
+    private struct SessionSlot {
+        let number: Int
+        let name: String
+        let pid: Int
+        let jsonlPath: String
+        let cwd: String
+    }
+
     private static let tokenKey = "bridge_bot_token"
     private static let chatIdKey = "bridge_chat_id"
     private static let enabledKey = "bridge_enabled"
@@ -28,6 +39,21 @@ final class BridgeCoordinator {
 
     // MARK: - Lifecycle
 
+    func validateConnection() async {
+        guard let telegram, await telegram.isConfigured else {
+            isConnected = false
+            return
+        }
+        do {
+            _ = try await telegram.getMe()
+            isConnected = true
+            lastBridgeError = nil
+        } catch {
+            isConnected = false
+            lastBridgeError = "Bot token invalid or API unreachable"
+        }
+    }
+
     func start() async {
         guard isEnabled, !botToken.isEmpty else { return }
 
@@ -35,6 +61,28 @@ final class BridgeCoordinator {
         if chatId != 0 {
             await telegram?.setChatId(chatId)
         }
+
+        // Validate token before starting services
+        do {
+            _ = try await telegram!.getMe()
+        } catch {
+            isConnected = false
+            lastBridgeError = "Bot token invalid or API unreachable"
+            return
+        }
+
+        // Auto-configure bot commands and description
+        try? await telegram?.setMyCommands([
+            TGBotCommand(command: "status", description: "Active sessions"),
+            TGBotCommand(command: "run", description: "Start a remote session"),
+            TGBotCommand(command: "stop", description: "Stop remote session"),
+            TGBotCommand(command: "start", description: "Show help"),
+            TGBotCommand(command: "1", description: "Send to session 1"),
+            TGBotCommand(command: "2", description: "Send to session 2"),
+            TGBotCommand(command: "3", description: "Send to session 3"),
+            TGBotCommand(command: "4", description: "Send to session 4")
+        ])
+        try? await telegram?.setMyDescription("Claudio — monitor and control Claude Code sessions.")
 
         do {
             try await hookServer.start()
@@ -59,6 +107,7 @@ final class BridgeCoordinator {
         }
 
         isConnected = true
+        lastBridgeError = nil
     }
 
     func stop() async {
@@ -88,6 +137,33 @@ final class BridgeCoordinator {
         let activePaths = Set(sessions.compactMap { $0.fullPath.isEmpty ? nil : $0.fullPath })
         let currentlyWatched = await sessionWatcher.watchedPaths
 
+        // Update session slots — keep existing numbers, assign new ones, prune ended
+        let activeProjectPaths = Set(sessions.map(\.projectPath))
+        var keptSlots: [SessionSlot] = []
+        for slot in sessionSlots {
+            if activeProjectPaths.contains(slot.cwd) {
+                // Update with fresh PID/jsonlPath from current session data
+                if let session = sessions.first(where: { $0.projectPath == slot.cwd }) {
+                    keptSlots.append(SessionSlot(
+                        number: slot.number, name: session.projectName,
+                        pid: session.pid, jsonlPath: session.fullPath, cwd: session.projectPath
+                    ))
+                } else {
+                    keptSlots.append(slot)
+                }
+            }
+        }
+        let keptCwds = Set(keptSlots.map(\.cwd))
+        for session in sessions where !keptCwds.contains(session.projectPath) {
+            keptSlots.append(SessionSlot(
+                number: nextSlotNumber, name: session.projectName,
+                pid: session.pid, jsonlPath: session.fullPath, cwd: session.projectPath
+            ))
+            nextSlotNumber += 1
+            if nextSlotNumber > 9 { nextSlotNumber = 1 }
+        }
+        sessionSlots = keptSlots
+
         for path in activePaths where !currentlyWatched.contains(path) {
             await sessionWatcher.watchFile(at: path)
         }
@@ -100,13 +176,13 @@ final class BridgeCoordinator {
 
     private func handleHookEvent(_ event: HookEvent, permissionId: String) async {
         guard let telegram else { return }
+        let tag = slotTag(from: event.cwd)
 
         switch event.hookEventName {
         case "PermissionRequest":
-            let project = projectName(from: event.cwd)
             let tool = event.toolName ?? "Unknown"
             let input = formatToolInput(event.toolInput)
-            let text = "<b>Permission Request — \(project)</b>\nTool: <code>\(tool)</code>\n\(input)"
+            let text = "\u{1F6A8} \(tag) — Permission Request\nTool: <code>\(tool)</code>\n\(input)"
             let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
                 TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
                 TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
@@ -114,29 +190,25 @@ final class BridgeCoordinator {
             await telegram.send(text, replyMarkup: keyboard)
 
         case "Notification":
-            let project = projectName(from: event.cwd)
             let type = event.notificationType ?? ""
             let msg = event.message ?? ""
             let prefix: String
             switch type {
-            case "idle_prompt": prefix = "<b>\(project)</b> — Waiting for input"
-            case "elicitation_dialog": prefix = "<b>\(project)</b> — Question"
-            case "permission_prompt": prefix = "<b>\(project)</b> — Permission needed"
-            default: prefix = "<b>\(project)</b>"
+            case "idle_prompt": prefix = "\u{1F928} \(tag) — Waiting for input"
+            case "elicitation_dialog": prefix = "\u{2753} \(tag) — Question"
+            case "permission_prompt": prefix = "\u{1F512} \(tag) — Permission needed"
+            default: prefix = "\u{1F514} \(tag) — Notification"
             }
             await telegram.send("\(prefix)\n\(escapeHTML(msg))")
 
         case "Stop":
-            let project = projectName(from: event.cwd)
-            await telegram.send("<b>\(project)</b> — Agent finished")
+            await telegram.send("\u{23F8}\u{FE0F} \(tag) — Agent finished")
 
         case "SessionStart":
-            let project = projectName(from: event.cwd)
-            await telegram.send("<b>\(project)</b> — Session started")
+            await telegram.send("\u{25B6}\u{FE0F} \(tag) — Session started")
 
         case "SessionEnd":
-            let project = projectName(from: event.cwd)
-            await telegram.send("<b>\(project)</b> — Session ended")
+            await telegram.send("\u{23F9}\u{FE0F} \(tag) — Session ended")
 
         default:
             break
@@ -152,21 +224,20 @@ final class BridgeCoordinator {
 
         if type == "assistant", let msg = obj["message"] as? [String: Any],
            let content = msg["content"] as? [[String: Any]] {
-            let project = projectName(from: line.sessionPath)
-            var texts: [String] = []
-            for block in content {
-                let blockType = block["type"] as? String
-                if blockType == "text", let text = block["text"] as? String {
-                    texts.append(text)
-                } else if blockType == "tool_use", let name = block["name"] as? String {
-                    texts.append("[Tool: \(name)]")
-                }
+            // Only collect text blocks — skip tool_use noise
+            let texts = content.compactMap { block -> String? in
+                guard block["type"] as? String == "text",
+                      let text = block["text"] as? String,
+                      !text.isEmpty else { return nil }
+                return text
             }
-            if !texts.isEmpty {
-                let combined = texts.joined(separator: "\n")
-                let truncated = combined.count > 3000 ? String(combined.prefix(3000)) + "..." : combined
-                await telegram.send("<b>\(project)</b>\n\(escapeHTML(truncated))")
-            }
+            // Skip entirely if no text blocks (all tool_use)
+            guard !texts.isEmpty else { return }
+
+            let tag = slotTag(fromJsonlPath: line.sessionPath)
+            let combined = texts.joined(separator: "\n")
+            let truncated = combined.count > 1500 ? String(combined.prefix(1500)) + "..." : combined
+            await telegram.send("<b>\(tag)</b>\n\(escapeHTML(truncated))")
         }
     }
 
@@ -193,6 +264,26 @@ final class BridgeCoordinator {
     }
 
     private func handleTextCommand(_ text: String) async {
+        // /N message — send to session N
+        if let (slotNum, message) = parseSlotCommand(text) {
+            guard let slot = findSlot(byNumber: slotNum) else {
+                await telegram?.send("Session \(slotNum) not found")
+                return
+            }
+            guard slot.pid > 0 else {
+                await telegram?.send("Session \(slotNum) has no active process")
+                return
+            }
+            let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
+            switch result {
+            case .success:
+                await telegram?.send("Sent to \(slotEmoji(slot.number)) \(escapeHTML(slot.name))")
+            case .failed(let err):
+                await telegram?.send("Failed: \(escapeHTML(err))")
+            }
+            return
+        }
+
         if text.hasPrefix("/run ") {
             let args = text.dropFirst(5).trimmingCharacters(in: .whitespaces)
             let parts = args.components(separatedBy: " ")
@@ -217,13 +308,25 @@ final class BridgeCoordinator {
             await telegram?.send("Remote session stopped")
         } else if text == "/status" {
             let remote = await remoteManager.hasActiveSession
-            let watched = await sessionWatcher.watchedPaths.count
-            await telegram?.send(
-                "Bridge: active\nWatched sessions: \(watched)\nRemote session: \(remote ? "running" : "none")"
-            )
+            var lines = ["<b>Claudio Bridge</b>\n"]
+            if sessionSlots.isEmpty {
+                lines.append("No active sessions")
+            } else {
+                for slot in sessionSlots {
+                    let elapsed = formatElapsed(slot)
+                    lines.append("\(slotEmoji(slot.number)) \(escapeHTML(slot.name)) · \(elapsed)")
+                }
+            }
+            lines.append("\nRemote: \(remote ? "running" : "none")")
+            await telegram?.send(lines.joined(separator: "\n"))
         } else if text == "/start" {
-            // Initial handshake — chatId already captured above
-            await telegram?.send("Claudio bridge ready.")
+            await telegram?.send(
+                "Claudio bridge ready.\n\n" +
+                "/status — active sessions\n" +
+                "/1 /2 ... — send to session\n" +
+                "/run {project} {prompt} — remote session\n" +
+                "/stop — stop remote session"
+            )
         } else if await remoteManager.hasActiveSession {
             await remoteManager.sendInput(text)
         }
@@ -262,76 +365,201 @@ final class BridgeCoordinator {
 
     // MARK: - Hook installation
 
+    private static let hookEvents: [(event: String, path: String, timeout: Int?)] = [
+        ("PermissionRequest", "/hook/permission", 120),
+        ("Notification",      "/hook/notification", nil),
+        ("Stop",              "/hook/stop", nil),
+        ("SessionStart",      "/hook/session-start", nil),
+        ("SessionEnd",        "/hook/session-end", nil)
+    ]
+
+    /// Installs native HTTP hooks into ~/.claude/settings.json.
+    /// Removes any stale Claudio hooks (old command-style or HTTP) before adding fresh ones.
     func installHooks() {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let settingsPath = "\(home)/.claude/settings.json"
-        let fm = FileManager.default
-
-        var settings: [String: Any] = [:]
-        if let data = fm.contents(atPath: settingsPath),
-           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            settings = existing
-        }
-
-        let base = "curl -s -X POST http://localhost:\(Self.hookPort)"
-        let hookEvents: [(String, String, Int?)] = [
-            ("PermissionRequest", "\(base)/hook/permission -d @-", 120),
-            ("Notification", "\(base)/hook/notification -d @-", nil),
-            ("Stop", "\(base)/hook/stop -d @-", nil),
-            ("SessionStart", "\(base)/hook/session-start -d @-", nil),
-            ("SessionEnd", "\(base)/hook/session-end -d @-", nil)
-        ]
-
+        var settings = readSettings()
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
-        for (event, command, timeout) in hookEvents {
-            var hookDef: [String: Any] = ["type": "command", "command": command]
+        // Remove any existing Claudio hooks first (handles migration from command→http)
+        stripOurHooks(&hooks)
+
+        // Install fresh HTTP hooks
+        let baseURL = "http://localhost:\(Self.hookPort)"
+        for (event, path, timeout) in Self.hookEvents {
+            var hookDef: [String: Any] = ["type": "http", "url": "\(baseURL)\(path)"]
             if let timeout { hookDef["timeout"] = timeout }
             let entry: [String: Any] = ["matcher": "", "hooks": [hookDef]]
 
             if var existing = hooks[event] as? [[String: Any]] {
-                let alreadyInstalled = existing.contains { e in
-                    guard let h = e["hooks"] as? [[String: Any]] else { return false }
-                    return h.contains { ($0["command"] as? String)?.contains("localhost:\(Self.hookPort)") == true }
-                }
-                if !alreadyInstalled {
-                    existing.append(entry)
-                    hooks[event] = existing
-                }
+                existing.append(entry)
+                hooks[event] = existing
             } else {
                 hooks[event] = [entry]
             }
         }
 
         settings["hooks"] = hooks
-
-        if let data = try? JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]) {
-            fm.createFile(atPath: settingsPath, contents: data)
-        }
-
+        writeSettings(settings)
         hooksInstalled = true
     }
 
-    func checkHooksInstalled() -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let settingsPath = "\(home)/.claude/settings.json"
-        guard let data = FileManager.default.contents(atPath: settingsPath),
-              let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hooks = settings["hooks"] as? [String: Any],
-              let permHooks = hooks["PermissionRequest"] as? [[String: Any]] else {
-            return false
+    /// Removes all Claudio hooks from ~/.claude/settings.json.
+    func uninstallHooks() {
+        var settings = readSettings()
+        guard var hooks = settings["hooks"] as? [String: Any] else {
+            hooksInstalled = false
+            return
         }
-        return permHooks.contains { entry in
-            guard let h = entry["hooks"] as? [[String: Any]] else { return false }
-            return h.contains { ($0["command"] as? String)?.contains("localhost:\(Self.hookPort)") == true }
+
+        stripOurHooks(&hooks)
+
+        if hooks.isEmpty {
+            settings.removeValue(forKey: "hooks")
+        } else {
+            settings["hooks"] = hooks
+        }
+
+        writeSettings(settings)
+        hooksInstalled = false
+    }
+
+    /// Checks that ALL required hook events are installed (not just PermissionRequest).
+    func checkHooksInstalled() -> Bool {
+        let settings = readSettings()
+        guard let hooks = settings["hooks"] as? [String: Any] else { return false }
+
+        return Self.hookEvents.allSatisfy { event, _, _ in
+            guard let entries = hooks[event] as? [[String: Any]] else { return false }
+            return entries.contains(where: Self.isOurEntry)
+        }
+    }
+
+    // MARK: - Settings helpers
+
+    private static var settingsPath: String {
+        FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/settings.json"
+    }
+
+    private func readSettings() -> [String: Any] {
+        guard let data = FileManager.default.contents(atPath: Self.settingsPath),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return obj
+    }
+
+    private func writeSettings(_ settings: [String: Any]) {
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: settings,
+            options: [.prettyPrinted, .sortedKeys]
+        ) else { return }
+        FileManager.default.createFile(atPath: Self.settingsPath, contents: data)
+    }
+
+    /// Returns true if a hook definition belongs to Claudio (matches our port in url or command).
+    private static func isOurHookDef(_ def: [String: Any]) -> Bool {
+        let port = String(hookPort)
+        if let cmd = def["command"] as? String, cmd.contains("localhost:\(port)") { return true }
+        if let url = def["url"] as? String, url.contains("localhost:\(port)") { return true }
+        return false
+    }
+
+    /// Returns true if a matcher-group entry contains a Claudio hook.
+    private static func isOurEntry(_ entry: [String: Any]) -> Bool {
+        guard let defs = entry["hooks"] as? [[String: Any]] else { return false }
+        return defs.contains(where: isOurHookDef)
+    }
+
+    /// Removes all Claudio entries from a hooks dictionary, cleaning up empty event arrays.
+    private func stripOurHooks(_ hooks: inout [String: Any]) {
+        for (event, value) in hooks {
+            guard var entries = value as? [[String: Any]] else { continue }
+            entries.removeAll(where: Self.isOurEntry)
+            if entries.isEmpty {
+                hooks.removeValue(forKey: event)
+            } else {
+                hooks[event] = entries
+            }
         }
     }
 
     // MARK: - Helpers
 
-    private func projectName(from path: String?) -> String {
-        guard let path else { return "Unknown" }
-        return URL(fileURLWithPath: path).lastPathComponent
+    private func slotEmoji(_ n: Int) -> String {
+        let clamped = ((n - 1) % 9) + 1
+        return "\(clamped)\u{FE0F}\u{20E3}"
+    }
+
+    /// Build display tag like "1️⃣ jkbClaudio" from a cwd path (hook events)
+    private func slotTag(from cwd: String?) -> String {
+        guard let cwd else { return "Unknown" }
+        let name = URL(fileURLWithPath: cwd).lastPathComponent
+        if let slot = sessionSlots.first(where: { $0.name == name || $0.cwd == cwd }) {
+            return "<b>\(slotEmoji(slot.number)) \(escapeHTML(slot.name))</b>"
+        }
+        return "<b>\(escapeHTML(name))</b>"
+    }
+
+    /// Build display tag from a jsonl file path (watcher events)
+    private func slotTag(fromJsonlPath path: String) -> String {
+        if let slot = sessionSlots.first(where: { $0.jsonlPath == path }) {
+            return "\(slotEmoji(slot.number)) \(escapeHTML(slot.name))"
+        }
+        return escapeHTML(URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent)
+    }
+
+    private func findSlot(byNumber n: Int) -> SessionSlot? {
+        sessionSlots.first(where: { $0.number == n })
+    }
+
+    /// Parse "/1 hello" → (1, "hello"). Returns nil if no message body.
+    private func parseSlotCommand(_ text: String) -> (Int, String)? {
+        guard text.hasPrefix("/"),
+              let first = text.dropFirst().first,
+              let n = Int(String(first)), n >= 1, n <= 9 else { return nil }
+        let rest = text.dropFirst(2)
+        guard rest.first == " " else { return nil }
+        let message = rest.dropFirst().trimmingCharacters(in: .whitespaces)
+        guard !message.isEmpty else { return nil }
+        return (n, message)
+    }
+
+    private func formatElapsed(_ slot: SessionSlot) -> String {
+        // Find matching session's elapsedSeconds from slots (we don't store it)
+        // Use a simpler approach: look up from pid via ps
+        let pipe = Pipe()
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-p", String(slot.pid), "-o", "etime="]
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        do { try ps.run(); ps.waitUntilExit() } catch { return "?" }
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !output.isEmpty else { return "?" }
+        // Convert etime to friendly format
+        return friendlyElapsed(output)
+    }
+
+    /// Convert ps etime "01:23" / "1-02:03:04" to "1h 23m" style
+    private func friendlyElapsed(_ etime: String) -> String {
+        var total = 0
+        var str = etime
+        if let dash = str.firstIndex(of: "-") {
+            let days = Int(str[str.startIndex..<dash]) ?? 0
+            total += days * 86400
+            str = String(str[str.index(after: dash)...])
+        }
+        let parts = str.components(separatedBy: ":").compactMap { Int($0) }
+        switch parts.count {
+        case 3: total += parts[0] * 3600 + parts[1] * 60 + parts[2]
+        case 2: total += parts[0] * 60 + parts[1]
+        case 1: total += parts[0]
+        default: break
+        }
+        if total >= 3600 {
+            return "\(total / 3600)h \((total % 3600) / 60)m"
+        }
+        return "\(total / 60)m"
     }
 
     private func formatToolInput(_ input: [String: AnyCodable]?) -> String {

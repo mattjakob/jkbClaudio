@@ -1,6 +1,7 @@
 import Foundation
 
 struct ProcessInfo: Sendable {
+    let pid: String
     let path: String
     let elapsedSeconds: Int
     let memoryMB: Double
@@ -29,6 +30,7 @@ actor SessionService {
             if var session = findSessionForPath(info.path, excluding: usedSessionPaths) {
                 if !session.fullPath.isEmpty { usedSessionPaths.insert(session.fullPath) }
                 enrichSession(&session)
+                session.pid = Int(info.pid) ?? 0
                 session.elapsedSeconds = info.elapsedSeconds
                 session.memoryMB = info.memoryMB
                 session.cpuPercent = info.cpuPercent
@@ -325,6 +327,7 @@ actor SessionService {
                 let path = String(line.dropFirst(1))
                 let stats = pidStats[pid] ?? (0, 0, 0)
                 results.append(ProcessInfo(
+                    pid: pid,
                     path: path,
                     elapsedSeconds: stats.elapsed,
                     memoryMB: stats.memMB,

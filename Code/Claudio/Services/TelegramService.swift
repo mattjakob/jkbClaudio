@@ -104,6 +104,21 @@ actor TelegramService {
         let _: Bool = try await post("editMessageReplyMarkup", body: body)
     }
 
+    func getMe() async throws -> TGUser {
+        struct Empty: Encodable {}
+        return try await post("getMe", body: Empty())
+    }
+
+    func setMyCommands(_ commands: [TGBotCommand]) async throws {
+        let body = TGSetMyCommands(commands: commands)
+        let _: Bool = try await post("setMyCommands", body: body)
+    }
+
+    func setMyDescription(_ description: String) async throws {
+        let body = TGSetMyDescription(description: description)
+        let _: Bool = try await post("setMyDescription", body: body)
+    }
+
     func send(_ text: String, replyMarkup: TGInlineKeyboardMarkup? = nil) async {
         guard let chatId else { return }
 
