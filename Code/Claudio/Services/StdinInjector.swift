@@ -93,6 +93,14 @@ enum StdinInjector {
     }
 
     private static func tmuxSendKeys(pane: String, text: String) -> InjectionResult {
+        // Clear any existing input first
+        let clear = Process()
+        clear.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        clear.arguments = ["tmux", "send-keys", "-t", pane, "C-u"]
+        clear.standardOutput = FileHandle.nullDevice
+        clear.standardError = FileHandle.nullDevice
+        do { try clear.run(); clear.waitUntilExit() } catch {}
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["tmux", "send-keys", "-t", pane, "-l", text]
@@ -127,6 +135,7 @@ enum StdinInjector {
                     repeat with t in tabs of w
                         repeat with s in sessions of t
                             if tty of s is "\(escaped(ttyPath))" then
+                                tell s to write text (character id 21) newline no
                                 tell s to write text "\(escaped(text))"
                                 return "ok"
                             end if
@@ -178,6 +187,8 @@ enum StdinInjector {
         let typeScript = """
             tell application "System Events"
                 tell process "Terminal"
+                    keystroke "u" using control down
+                    delay 0.05
                     keystroke "\(escaped(text))"
                     delay 0.05
                     key code 36
