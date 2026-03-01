@@ -16,7 +16,7 @@ struct BridgeSettingsView: View {
                     .padding(.bottom, 12)
 
                 if bridge.isEnabled {
-                    if !bridge.botToken.isEmpty && bridge.isConnected && bridge.hooksInstalled {
+                    if !bridge.botToken.isEmpty && bridge.isConnected && bridge.hooksInstalled && bridge.accessibilityGranted {
                         // Fully configured — compact view
                         statusCard
                             .padding(.bottom, 12)
@@ -47,6 +47,7 @@ struct BridgeSettingsView: View {
         }
         .onAppear {
             bridge.hooksInstalled = bridge.checkHooksInstalled()
+            bridge.checkAccessibility()
             Task { await bridge.validateConnection() }
         }
     }
@@ -98,7 +99,7 @@ struct BridgeSettingsView: View {
             // Step 1: Bot token
             stepCard(
                 number: 1,
-                title: "Bot Token",
+                title: "@BotFather Token",
                 done: !bridge.botToken.isEmpty
             ) {
                 if isEditingToken {
@@ -147,7 +148,7 @@ struct BridgeSettingsView: View {
             // Step 2: Connect
             stepCard(
                 number: 2,
-                title: "Connect",
+                title: "Connection",
                 done: bridge.isConnected
             ) {
                 if bridge.botToken.isEmpty {
@@ -172,7 +173,7 @@ struct BridgeSettingsView: View {
             // Step 3: Hooks
             stepCard(
                 number: 3,
-                title: "Hooks",
+                title: "Claude Hooks",
                 done: bridge.hooksInstalled
             ) {
                 if bridge.hooksInstalled {
@@ -203,6 +204,36 @@ struct BridgeSettingsView: View {
                     }
                 }
             }
+
+            // Step 4: Accessibility
+            stepCard(
+                number: 4,
+                title: "Terminal Access",
+                done: bridge.accessibilityGranted
+            ) {
+                if !bridge.hooksInstalled {
+                    Text("Install hooks first.")
+                        .font(.caption2)
+                        .foregroundStyle(.quaternary)
+                } else if bridge.accessibilityGranted {
+                    Text("Granted — message injection enabled.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Required to send messages to terminal sessions.")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Grant Access") {
+                            bridge.promptAccessibility()
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.blue)
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
         }
     }
 
@@ -211,15 +242,10 @@ struct BridgeSettingsView: View {
     private var statusCard: some View {
         VStack(spacing: 0) {
             settingsRow("Status") {
-                HStack(spacing: 5) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
-                    Text("Connected")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+                statusBadge("Connected")
             }
             rowDivider
-            settingsRow("Bot Token") {
+            settingsRow("@BotFather Token") {
                 HStack(spacing: 8) {
                     Text("****\(String(bridge.botToken.suffix(4)))")
                         .font(.callout)
@@ -258,13 +284,12 @@ struct BridgeSettingsView: View {
                 }
             }
             rowDivider
-            settingsRow("Hooks") {
-                HStack(spacing: 5) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
-                    Text("Installed")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+            settingsRow("Claude Hooks") {
+                statusBadge("Installed")
+            }
+            rowDivider
+            settingsRow("Terminal Access") {
+                statusBadge("Granted")
             }
             rowDivider
             HStack {
@@ -339,6 +364,16 @@ struct BridgeSettingsView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+    }
+
+    private func statusBadge(_ text: String, color: Color? = nil) -> some View {
+        let c = color ?? .secondary
+        return Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(c)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(c.opacity(0.12), in: Capsule())
     }
 
     private var rowDivider: some View {

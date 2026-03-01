@@ -120,11 +120,11 @@ struct SessionRow: View {
 
             HStack(spacing: 8) {
                 if session.subagentCount > 0 {
-                    Label("\(session.subagentCount) subagent\(session.subagentCount == 1 ? "" : "s")", systemImage: "sparkles.square.filled.on.square")
+                    Label("\(session.subagentCount + 1) agents", systemImage: "sparkles.square.filled.on.square")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 } else {
-                    Label("single agent", systemImage: "sparkles")
+                    Label("1 agent", systemImage: "sparkles")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

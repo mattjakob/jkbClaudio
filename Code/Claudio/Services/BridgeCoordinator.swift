@@ -10,6 +10,7 @@ final class BridgeCoordinator {
     var botToken: String = ""
     var chatId: Int = 0
     var hooksInstalled = false
+    var accessibilityGranted = false
     var lastBridgeError: String?
     var isFinalizingSetup = false
     var disabledFilters: Set<String> = []
@@ -198,12 +199,15 @@ final class BridgeCoordinator {
         }
     }
 
-    /// If Accessibility isn't trusted, reset any stale TCC entry and prompt the user.
-    private func ensureAccessibility() {
-        guard !AXIsProcessTrusted() else { return }
+    /// Updates the `accessibilityGranted` observable property.
+    func checkAccessibility() {
+        accessibilityGranted = AXIsProcessTrusted()
+    }
 
+    /// Prompts the user to grant Accessibility permission, resetting stale TCC entries first.
+    func promptAccessibility() {
         // Reset stale entry (signature changed after rebuild)
-        if let bundleId = Bundle.main.bundleIdentifier {
+        if !AXIsProcessTrusted(), let bundleId = Bundle.main.bundleIdentifier {
             let reset = Process()
             reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
             reset.arguments = ["reset", "Accessibility", bundleId]
@@ -213,10 +217,19 @@ final class BridgeCoordinator {
             reset.waitUntilExit()
         }
 
-        // Prompt user to grant permission
         let _ = AXIsProcessTrustedWithOptions(
             ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         )
+        checkAccessibility()
+    }
+
+    /// If Accessibility isn't trusted, reset any stale TCC entry and prompt the user.
+    private func ensureAccessibility() {
+        guard !AXIsProcessTrusted() else {
+            accessibilityGranted = true
+            return
+        }
+        promptAccessibility()
     }
 
     func stop() async {
@@ -437,9 +450,8 @@ final class BridgeCoordinator {
                     let name = slot.name.count > maxName
                         ? String(slot.name.prefix(maxName - 1)) + "\u{2026}"
                         : slot.name
-                    let agents = slot.subagentCount > 0
-                        ? "\(slot.subagentCount) subagent\(slot.subagentCount == 1 ? "" : "s")"
-                        : "1 agent"
+                    let total = slot.subagentCount + 1
+                    let agents = total == 1 ? "1 agent" : "\(total) agents"
                     let state = slot.cpuPercent > 5
                         ? friendlyElapsed(slot.elapsedSeconds)
                         : "idle"
