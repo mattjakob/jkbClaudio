@@ -4,11 +4,18 @@ set -euo pipefail
 APP_NAME="Claudio"
 SIGNING_IDENTITY="Developer ID Application: Matt Jakob (TXY9794V3B)"
 NOTARIZE_PROFILE="Claudio-notarize"
-VERSION="${1:-1.0.0}"
+
+# Auto-increment version from latest git tag (v1.2.3 → 1.2.4), or start at 1.0.0
+LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+MAJOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f1)
+MINOR=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f2)
+PATCH=$(echo "$LATEST_TAG" | sed 's/^v//' | cut -d. -f3)
+PATCH=$((PATCH + 1))
+VERSION="${1:-$MAJOR.$MINOR.$PATCH}"
 
 BUILD_DIR=".build/arm64-apple-macosx/release"
 APP_DIR="$BUILD_DIR/$APP_NAME.app"
-DMG_NAME="${APP_NAME}-${VERSION}.dmg"
+DMG_NAME="${APP_NAME}.dmg"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DMG_DIR="$REPO_ROOT"
 
@@ -138,5 +145,15 @@ xcrun notarytool submit "$DMG_DIR/$DMG_NAME" \
 echo "==> Stapling notarization ticket..."
 xcrun stapler staple "$DMG_DIR/$DMG_NAME"
 
+echo "==> Creating GitHub release v$VERSION..."
+TAG="v$VERSION"
+git tag "$TAG"
+git push origin "$TAG"
+gh release create "$TAG" "$DMG_DIR/$DMG_NAME" \
+    --title "$APP_NAME $TAG" \
+    --notes "Release $TAG" \
+    --latest
+
 echo ""
-echo "Done! Distributable DMG: $DMG_DIR/$DMG_NAME"
+echo "Done! DMG: $DMG_DIR/$DMG_NAME"
+echo "Release: https://github.com/mattjakob/jkbClaudio/releases/tag/$TAG"
