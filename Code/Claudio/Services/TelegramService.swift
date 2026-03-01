@@ -171,11 +171,12 @@ actor TelegramService {
         guard let chatId else { return false }
 
         let truncated = text.count > 4000 ? String(text.prefix(4000)) : text
+        let wrapped = "<pre>\(truncated)</pre>"
 
         do {
             _ = try await sendMessage(
                 chatId: chatId,
-                text: truncated,
+                text: wrapped,
                 parseMode: "HTML",
                 replyMarkup: replyMarkup
             )

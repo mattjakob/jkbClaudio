@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 
 @Observable
 @MainActor
@@ -19,6 +20,7 @@ final class BridgeCoordinator {
 
     private var sessionSlots: [SessionSlot] = []
     private var nextSlotNumber: Int = 1
+    private var pendingRouteMessage: String?
 
     private struct SessionSlot {
         let number: Int
@@ -27,9 +29,13 @@ final class BridgeCoordinator {
         let jsonlPath: String
         let cwd: String
         let elapsedSeconds: Int
+        let assistantTurns: Int
+        let subagentCount: Int
+        let cpuPercent: Double
     }
 
-    private static let tokenKey = "bridge_bot_token"
+    private static let keychainService = "com.claudio.telegram-bot"
+    private static let keychainAccount = "bot_token"
     private static let chatIdKey = "bridge_chat_id"
     private static let enabledKey = "bridge_enabled"
     private static let filtersKey = "bridge_disabled_filters"
@@ -106,11 +112,18 @@ final class BridgeCoordinator {
     }
 
     init() {
-        botToken = UserDefaults.standard.string(forKey: Self.tokenKey) ?? ""
+        botToken = Self.readTokenFromKeychain() ?? ""
         chatId = UserDefaults.standard.integer(forKey: Self.chatIdKey)
         isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
         let saved = UserDefaults.standard.stringArray(forKey: Self.filtersKey) ?? []
         disabledFilters = Set(saved)
+
+        // Migrate token from UserDefaults to Keychain (one-time)
+        if botToken.isEmpty, let legacy = UserDefaults.standard.string(forKey: "bridge_bot_token"), !legacy.isEmpty {
+            botToken = legacy
+            Self.saveTokenToKeychain(legacy)
+            UserDefaults.standard.removeObject(forKey: "bridge_bot_token")
+        }
     }
 
     // MARK: - Lifecycle
@@ -177,6 +190,32 @@ final class BridgeCoordinator {
 
         isConnected = hookStarted
         if hookStarted { lastBridgeError = nil }
+
+        // Ensure Accessibility permission is valid (detects stale TCC entries after rebuild)
+        if checkHooksInstalled() {
+            ensureAccessibility()
+        }
+    }
+
+    /// If Accessibility isn't trusted, reset any stale TCC entry and prompt the user.
+    private func ensureAccessibility() {
+        guard !AXIsProcessTrusted() else { return }
+
+        // Reset stale entry (signature changed after rebuild)
+        if let bundleId = Bundle.main.bundleIdentifier {
+            let reset = Process()
+            reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            reset.arguments = ["reset", "Accessibility", bundleId]
+            reset.standardOutput = FileHandle.nullDevice
+            reset.standardError = FileHandle.nullDevice
+            try? reset.run()
+            reset.waitUntilExit()
+        }
+
+        // Prompt user to grant permission
+        let _ = AXIsProcessTrustedWithOptions(
+            ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+        )
     }
 
     func stop() async {
@@ -188,7 +227,7 @@ final class BridgeCoordinator {
 
     func saveBotToken(_ token: String) async {
         botToken = token
-        UserDefaults.standard.set(token, forKey: Self.tokenKey)
+        Self.saveTokenToKeychain(token)
         if isEnabled {
             await stop()
             await start()
@@ -215,7 +254,10 @@ final class BridgeCoordinator {
                     keptSlots.append(SessionSlot(
                         number: slot.number, name: session.projectName,
                         pid: session.pid, jsonlPath: session.fullPath,
-                        cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds
+                        cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds,
+                        assistantTurns: session.assistantTurns,
+                        subagentCount: session.subagentCount,
+                        cpuPercent: session.cpuPercent
                     ))
                 } else {
                     keptSlots.append(slot)
@@ -235,7 +277,10 @@ final class BridgeCoordinator {
             keptSlots.append(SessionSlot(
                 number: n, name: session.projectName,
                 pid: session.pid, jsonlPath: session.fullPath,
-                cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds
+                cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds,
+                assistantTurns: session.assistantTurns,
+                subagentCount: session.subagentCount,
+                cpuPercent: session.cpuPercent
             ))
             nextSlotNumber = (n % 9) + 1
         }
@@ -253,13 +298,13 @@ final class BridgeCoordinator {
 
     private func handleHookEvent(_ event: HookEvent, permissionId: String) async {
         guard let telegram else { return }
-        let tag = slotTag(from: event.cwd)
 
         switch event.hookEventName {
         case "PermissionRequest":
+            let tag = slotTag(from: event.cwd, emoji: "\u{26A1}\u{FE0F}")
             let tool = event.toolName ?? "Unknown"
             let input = formatToolInput(event.toolInput)
-            let text = "\u{1F6A8} \(tag) — Permission Request\nTool: <code>\(tool)</code>\n\(input)"
+            let text = "\(tag)\nTool: <code>\(tool)</code>\n\(input)"
             let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
                 TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
                 TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
@@ -268,36 +313,43 @@ final class BridgeCoordinator {
 
         case "Notification":
             let type = event.notificationType ?? ""
+            let emoji: String
             switch type {
             case "idle_prompt":
                 guard isFilterEnabled(.inputNeeded) else { return }
+                emoji = "\u{1F955}"
             case "elicitation_dialog":
                 guard isFilterEnabled(.questions) else { return }
+                emoji = "\u{1F430}"
+            case "permission_prompt":
+                // Handled by PermissionRequest hook with approve/deny buttons
+                return
+            case "auth_success":
+                // Internal event, not useful to forward
+                return
             default:
                 guard isFilterEnabled(.inputNeeded) else { return }
+                emoji = "\u{1F338}"
             }
+            let tag = slotTag(from: event.cwd, emoji: emoji)
             let title = event.title
             let msg = event.message ?? ""
             let body = [title, msg.isEmpty ? nil : msg]
                 .compactMap { $0 }
                 .joined(separator: "\n")
-            let prefix: String
-            switch type {
-            case "idle_prompt": prefix = "\u{1F928} \(tag) — Waiting for input"
-            case "elicitation_dialog": prefix = "\u{2753} \(tag) — Question"
-            case "permission_prompt": prefix = "\u{1F512} \(tag) — Permission needed"
-            default: prefix = "\u{1F514} \(tag) — Notification"
-            }
-            await telegram.send("\(prefix)\n\(escapeHTML(body))")
+            await telegram.send("\(tag)\n\(escapeHTML(body))")
 
         case "Stop":
-            await telegram.send("\u{23F8}\u{FE0F} \(tag) — Agent finished")
+            let tag = slotTag(from: event.cwd, emoji: "\u{1FAD6}")
+            await telegram.send(tag)
 
         case "SessionStart":
-            await telegram.send("\u{25B6}\u{FE0F} \(tag) — Session started")
+            let tag = slotTag(from: event.cwd, emoji: "\u{2615}\u{FE0F}")
+            await telegram.send(tag)
 
         case "SessionEnd":
-            await telegram.send("\u{23F9}\u{FE0F} \(tag) — Session ended")
+            let tag = slotTag(from: event.cwd, emoji: "\u{1F36D}")
+            await telegram.send(tag)
 
         default:
             break
@@ -322,10 +374,16 @@ final class BridgeCoordinator {
             }
             guard !texts.isEmpty else { return }
 
-            let tag = slotTag(fromJsonlPath: line.sessionPath)
+            let name: String
+            if let slot = sessionSlots.first(where: { $0.jsonlPath == line.sessionPath }) {
+                name = "<b>\(slotLabel(slot.number)) \(escapeHTML(slot.name))</b>"
+            } else {
+                let dir = URL(fileURLWithPath: line.sessionPath).deletingLastPathComponent().lastPathComponent
+                name = "<b>\(escapeHTML(dir))</b>"
+            }
             let combined = texts.joined(separator: "\n")
             let truncated = combined.count > 1500 ? String(combined.prefix(1500)) + "..." : combined
-            await telegram.send("<b>\(tag)</b>\n\(escapeHTML(truncated))")
+            await telegram.send("\(name)\n\(escapeHTML(truncated))")
         }
     }
 
@@ -365,7 +423,7 @@ final class BridgeCoordinator {
             let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
             switch result {
             case .success:
-                await telegram?.send("Sent to \(slotEmoji(slot.number)) \(escapeHTML(slot.name))")
+                await telegram?.send("Sent to \(slotLabel(slot.number)) \(escapeHTML(slot.name))")
             case .failed(let err):
                 await telegram?.send("Failed: \(escapeHTML(err))")
             }
@@ -373,22 +431,77 @@ final class BridgeCoordinator {
         }
 
         if text == "/status" {
-            var lines = ["<b>Claudio Bridge</b>\n"]
+            var lines = ["\u{2728} <b>STATUS</b> \u{2728}\n"]
             if sessionSlots.isEmpty {
                 lines.append("No active sessions")
             } else {
-                for slot in sessionSlots {
-                    let elapsed = friendlyElapsed(slot.elapsedSeconds)
-                    lines.append("\(slotEmoji(slot.number)) \(escapeHTML(slot.name)) · \(elapsed)")
+                let maxName = 10
+                // Build column data to compute widths
+                struct Row {
+                    let label: String; let name: String; let agents: String; let state: String
                 }
+                let rows: [Row] = sessionSlots.map { slot in
+                    let name = slot.name.count > maxName
+                        ? String(slot.name.prefix(maxName - 1)) + "\u{2026}"
+                        : slot.name
+                    let agents = slot.subagentCount > 0
+                        ? "\(slot.subagentCount) subagent\(slot.subagentCount == 1 ? "" : "s")"
+                        : "1 agent"
+                    let state = slot.cpuPercent > 5
+                        ? friendlyElapsed(slot.elapsedSeconds)
+                        : "idle"
+                    return Row(label: slotLabel(slot.number), name: name, agents: agents, state: state)
+                }
+                let nameW = rows.map(\.name.count).max() ?? 0
+                let agentW = rows.map(\.agents.count).max() ?? 0
+                for row in rows {
+                    let n = row.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
+                    let a = row.agents.padding(toLength: agentW, withPad: " ", startingAt: 0)
+                    lines.append("\(row.label) \(escapeHTML(n)) | \(a) | \(row.state)")
+                }
+                lines.append("\nUse /1 [message] to send a message directly to an agent")
             }
             await telegram?.send(lines.joined(separator: "\n"))
         } else if text == "/start" {
             await telegram?.send(
-                "Claudio bridge ready.\n\n" +
-                "/status — active sessions\n" +
-                "/1 msg, /2 msg ... — send to session"
+                "\u{1F3C0}\u{1F94E}\u{26BD}\u{FE0F} <b>CLAUDIO</b> \u{26BD}\u{FE0F}\u{1F94E}\u{1F3C0}\n\n" +
+                "Commands:\n" +
+                "/status        active sessions\n" +
+                "/[N] [MESSAGE] sends to agent\n" +
+                "[MESSAGE]      interactive"
             )
+        } else if !text.hasPrefix("/") {
+            // Bare message — route to last active session or prompt
+            await routeBareMessage(text)
+        }
+    }
+
+    private func routeBareMessage(_ text: String) async {
+        let activeSlots = sessionSlots.filter { $0.pid > 0 }
+
+        if activeSlots.isEmpty {
+            await telegram?.send("No active sessions")
+            return
+        }
+
+        pendingRouteMessage = text
+        let buttons = activeSlots.map { slot in
+            TGInlineKeyboardButton(
+                text: "\(slotLabel(slot.number)) \(slot.name)",
+                callbackData: "route_\(slot.number)"
+            )
+        }
+        let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [buttons])
+        await telegram?.send("Send to:", replyMarkup: keyboard)
+    }
+
+    private func injectToSlot(_ slot: SessionSlot, message: String) async {
+        let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
+        switch result {
+        case .success:
+            await telegram?.send("Sent to \(slotLabel(slot.number)) \(escapeHTML(slot.name))")
+        case .failed(let err):
+            await telegram?.send("Failed: \(escapeHTML(err))")
         }
     }
 
@@ -403,17 +516,33 @@ final class BridgeCoordinator {
             if let msg = callback.message {
                 try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
             }
+        } else if data.hasPrefix("route_") {
+            let numStr = String(data.dropFirst(6))
+            guard let num = Int(numStr),
+                  let slot = findSlot(byNumber: num),
+                  let message = pendingRouteMessage else {
+                try? await telegram?.answerCallbackQuery(id: callback.id, text: "Expired")
+                return
+            }
+            pendingRouteMessage = nil
+            try? await telegram?.answerCallbackQuery(id: callback.id)
+            if let msg = callback.message {
+                try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
+            }
+            await injectToSlot(slot, message: message)
         }
     }
 
     // MARK: - Hook installation
 
-    private static let hookEvents: [(event: String, path: String, timeout: Int?)] = [
-        ("PermissionRequest", "/hook/permission", 120),
-        ("Notification",      "/hook/notification", nil),
-        ("Stop",              "/hook/stop", nil),
-        ("SessionStart",      "/hook/session-start", nil),
-        ("SessionEnd",        "/hook/session-end", nil)
+    private enum HookType { case http, command }
+
+    private static let hookEvents: [(event: String, path: String, timeout: Int?, type: HookType)] = [
+        ("PermissionRequest", "/hook/permission",     120, .http),
+        ("Stop",              "/hook/stop",            nil, .http),
+        ("Notification",      "/hook/notification",    nil, .command),
+        ("SessionStart",      "/hook/session-start",   nil, .command),
+        ("SessionEnd",        "/hook/session-end",     nil, .command)
     ]
 
     /// Installs hooks into ~/.claude/settings.json based on current filter state.
@@ -433,10 +562,20 @@ final class BridgeCoordinator {
 
         // Re-add only hooks for enabled filters
         let baseURL = "http://localhost:\(Self.hookPort)"
-        for (event, path, timeout) in Self.hookEvents {
+        for (event, path, timeout, hookType) in Self.hookEvents {
             guard isHookNeeded(event) else { continue }
-            var hookDef: [String: Any] = ["type": "http", "url": "\(baseURL)\(path)"]
-            if let timeout { hookDef["timeout"] = timeout }
+            var hookDef: [String: Any]
+            switch hookType {
+            case .http:
+                hookDef = ["type": "http", "url": "\(baseURL)\(path)"]
+                if let timeout { hookDef["timeout"] = timeout }
+            case .command:
+                hookDef = [
+                    "type": "command",
+                    "command": "curl -s -X POST -H 'Content-Type: application/json' -d \"$(cat)\" \(baseURL)\(path)"
+                ]
+                if let timeout { hookDef["timeout"] = timeout }
+            }
             let entry: [String: Any] = ["matcher": "", "hooks": [hookDef]]
 
             if var existing = hooks[event] as? [[String: Any]] {
@@ -581,29 +720,28 @@ final class BridgeCoordinator {
 
     // MARK: - Helpers
 
-    private func slotEmoji(_ n: Int) -> String {
-        let clamped = ((n - 1) % 9) + 1
-        return "\(clamped)\u{FE0F}\u{20E3}"
+    private func slotLabel(_ n: Int) -> String {
+        "[\(((n - 1) % 9) + 1)]"
     }
 
-    /// Build display tag from a cwd path (hook events). Matches cwd first (exact), then name (ambiguous).
-    private func slotTag(from cwd: String?) -> String {
+    /// Build display tag for a specific event type from a cwd path (hook events).
+    private func slotTag(from cwd: String?, emoji: String) -> String {
         guard let cwd else { return "Unknown" }
         let name = URL(fileURLWithPath: cwd).lastPathComponent
-        // Prefer exact cwd match, fall back to name match
         if let slot = sessionSlots.first(where: { $0.cwd == cwd })
             ?? sessionSlots.first(where: { $0.name == name }) {
-            return "<b>\(slotEmoji(slot.number)) \(escapeHTML(slot.name))</b>"
+            return "\(emoji) <b>\(slotLabel(slot.number)) \(escapeHTML(slot.name))</b> \(emoji)"
         }
-        return "<b>\(escapeHTML(name))</b>"
+        return "\(emoji) <b>\(escapeHTML(name))</b> \(emoji)"
     }
 
-    /// Build display tag from a jsonl file path (watcher events)
-    private func slotTag(fromJsonlPath path: String) -> String {
+    /// Build display tag for a specific event type from a jsonl file path (watcher events).
+    private func slotTag(fromJsonlPath path: String, emoji: String) -> String {
         if let slot = sessionSlots.first(where: { $0.jsonlPath == path }) {
-            return "\(slotEmoji(slot.number)) \(escapeHTML(slot.name))"
+            return "\(emoji) \(slotLabel(slot.number)) \(escapeHTML(slot.name)) \(emoji)"
         }
-        return escapeHTML(URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent)
+        let name = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
+        return "\(emoji) \(escapeHTML(name)) \(emoji)"
     }
 
     private func findSlot(byNumber n: Int) -> SessionSlot? {
@@ -647,22 +785,36 @@ final class BridgeCoordinator {
             .replacingOccurrences(of: ">", with: "&gt;")
     }
 
-    private func resolveProjectPath(_ name: String) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let searchDirs = [
-            "\(home)/Documents/Code/Python",
-            "\(home)/Documents/Code/XCode",
-            "\(home)/Documents/Code/P5JS",
-            "\(home)/Documents/Code/PlatformIO",
-            "\(home)/Documents/Code"
+    // MARK: - Keychain
+
+    private static func readTokenFromKeychain() -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        for dir in searchDirs {
-            let candidate = "\(dir)/\(name)"
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue {
-                return candidate
-            }
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func saveTokenToKeychain(_ token: String) {
+        let data = Data(token.utf8)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount
+        ]
+        // Try update first, then add
+        let update: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecItemNotFound {
+            var addQuery = query
+            addQuery[kSecValueData as String] = data
+            SecItemAdd(addQuery as CFDictionary, nil)
         }
-        return nil
     }
 }
