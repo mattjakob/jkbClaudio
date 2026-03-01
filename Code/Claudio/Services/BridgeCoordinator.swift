@@ -375,7 +375,7 @@ final class BridgeCoordinator {
 
             let name: String
             if let slot = sessionSlots.first(where: { $0.jsonlPath == line.sessionPath }) {
-                name = "<b>\(slotLabel(slot.number)) \(escapeHTML(slot.name))</b>"
+                name = "<b>\(slotLabel(slot.number)) | \(escapeHTML(slot.name))</b>"
             } else {
                 let dir = URL(fileURLWithPath: line.sessionPath).deletingLastPathComponent().lastPathComponent
                 name = "<b>\(escapeHTML(dir))</b>"
@@ -422,7 +422,7 @@ final class BridgeCoordinator {
             let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
             switch result {
             case .success:
-                await telegram?.send("Sent to \(slotLabel(slot.number)) \(escapeHTML(slot.name))")
+                await telegram?.send("Sent to \(slotLabel(slot.number)) | \(escapeHTML(slot.name))")
             case .failed(let err):
                 await telegram?.send("Failed: \(escapeHTML(err))")
             }
@@ -486,7 +486,7 @@ final class BridgeCoordinator {
         pendingRouteMessage = text
         let buttons = activeSlots.map { slot in
             TGInlineKeyboardButton(
-                text: "\(slotLabel(slot.number)) \(slot.name)",
+                text: "\(slotLabel(slot.number)) | \(slot.name)",
                 callbackData: "route_\(slot.number)"
             )
         }
@@ -498,7 +498,7 @@ final class BridgeCoordinator {
         let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
         switch result {
         case .success:
-            await telegram?.send("Sent to \(slotLabel(slot.number)) \(escapeHTML(slot.name))")
+            await telegram?.send("Sent to \(slotLabel(slot.number)) | \(escapeHTML(slot.name))")
         case .failed(let err):
             await telegram?.send("Failed: \(escapeHTML(err))")
         }
@@ -720,7 +720,7 @@ final class BridgeCoordinator {
     // MARK: - Helpers
 
     private func slotLabel(_ n: Int) -> String {
-        "[\(((n - 1) % 9) + 1)]"
+        "\(((n - 1) % 9) + 1)"
     }
 
     /// Build display tag for a specific event type from a cwd path (hook events).
@@ -729,7 +729,7 @@ final class BridgeCoordinator {
         let name = URL(fileURLWithPath: cwd).lastPathComponent
         if let slot = sessionSlots.first(where: { $0.cwd == cwd })
             ?? sessionSlots.first(where: { $0.name == name }) {
-            return "\(emoji) <b>\(slotLabel(slot.number)) \(escapeHTML(slot.name))</b> \(emoji)"
+            return "\(emoji) <b>\(slotLabel(slot.number)) | \(escapeHTML(slot.name))</b> \(emoji)"
         }
         return "\(emoji) <b>\(escapeHTML(name))</b> \(emoji)"
     }
@@ -737,7 +737,7 @@ final class BridgeCoordinator {
     /// Build display tag for a specific event type from a jsonl file path (watcher events).
     private func slotTag(fromJsonlPath path: String, emoji: String) -> String {
         if let slot = sessionSlots.first(where: { $0.jsonlPath == path }) {
-            return "\(emoji) \(slotLabel(slot.number)) \(escapeHTML(slot.name)) \(emoji)"
+            return "\(emoji) \(slotLabel(slot.number)) | \(escapeHTML(slot.name)) \(emoji)"
         }
         let name = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
         return "\(emoji) \(escapeHTML(name)) \(emoji)"
