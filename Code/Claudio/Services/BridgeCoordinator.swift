@@ -191,8 +191,9 @@ final class BridgeCoordinator {
         isConnected = hookStarted
         if hookStarted { lastBridgeError = nil }
 
-        // Ensure Accessibility permission is valid (detects stale TCC entries after rebuild)
+        // Re-sync hooks on startup to pick up any code changes
         if checkHooksInstalled() {
+            syncHooks()
             ensureAccessibility()
         }
     }
@@ -528,14 +529,12 @@ final class BridgeCoordinator {
 
     // MARK: - Hook installation
 
-    private enum HookType { case http, command }
-
-    private static let hookEvents: [(event: String, path: String, timeout: Int?, type: HookType)] = [
-        ("PermissionRequest", "/hook/permission",     120, .http),
-        ("Stop",              "/hook/stop",            nil, .http),
-        ("Notification",      "/hook/notification",    nil, .command),
-        ("SessionStart",      "/hook/session-start",   nil, .command),
-        ("SessionEnd",        "/hook/session-end",     nil, .command)
+    private static let hookEvents: [(event: String, path: String, timeout: Int?)] = [
+        ("PermissionRequest", "/hook/permission",     120),
+        ("Stop",              "/hook/stop",            nil),
+        ("Notification",      "/hook/notification",    nil),
+        ("SessionStart",      "/hook/session-start",   nil),
+        ("SessionEnd",        "/hook/session-end",     nil)
     ]
 
     /// Installs hooks into ~/.claude/settings.json based on current filter state.
@@ -553,22 +552,12 @@ final class BridgeCoordinator {
         // Remove all Claudio hooks first (clean slate)
         stripOurHooks(&hooks)
 
-        // Re-add only hooks for enabled filters
+        // Re-add only hooks for enabled filters (all HTTP type)
         let baseURL = "http://localhost:\(Self.hookPort)"
-        for (event, path, timeout, hookType) in Self.hookEvents {
+        for (event, path, timeout) in Self.hookEvents {
             guard isHookNeeded(event) else { continue }
-            var hookDef: [String: Any]
-            switch hookType {
-            case .http:
-                hookDef = ["type": "http", "url": "\(baseURL)\(path)"]
-                if let timeout { hookDef["timeout"] = timeout }
-            case .command:
-                hookDef = [
-                    "type": "command",
-                    "command": "curl -s -X POST -H 'Content-Type: application/json' -d \"$(cat)\" \(baseURL)\(path)"
-                ]
-                if let timeout { hookDef["timeout"] = timeout }
-            }
+            var hookDef: [String: Any] = ["type": "http", "url": "\(baseURL)\(path)"]
+            if let timeout { hookDef["timeout"] = timeout }
             let entry: [String: Any] = ["matcher": "", "hooks": [hookDef]]
 
             if var existing = hooks[event] as? [[String: Any]] {
@@ -687,8 +676,8 @@ final class BridgeCoordinator {
     /// Returns true if a hook definition belongs to Claudio (matches our port in url or command).
     private static func isOurHookDef(_ def: [String: Any]) -> Bool {
         let port = String(hookPort)
-        if let cmd = def["command"] as? String, cmd.contains("localhost:\(port)") { return true }
         if let url = def["url"] as? String, url.contains("localhost:\(port)") { return true }
+        if let cmd = def["command"] as? String, cmd.contains("localhost:\(port)") { return true }
         return false
     }
 
