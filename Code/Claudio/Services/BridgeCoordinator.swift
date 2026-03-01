@@ -492,7 +492,7 @@ final class BridgeCoordinator {
         let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
         switch result {
         case .success:
-            await telegram?.send("Sent to \(slotLabel(slot.number)) | \(escapeHTML(slot.name))")
+            await telegram?.send("Sent to \(escapeHTML(slot.name))")
         case .failed(let err):
             await telegram?.send("Failed: \(escapeHTML(err))")
         }
