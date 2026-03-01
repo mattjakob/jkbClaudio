@@ -3,6 +3,7 @@ import SwiftUI
 struct SessionRow: View {
     let session: SessionEntry
     let isActive: Bool
+    @State private var isHovered = false
 
     private var isWorking: Bool {
         guard isActive, let lastActivity = session.lastActivityDate else { return false }
@@ -144,6 +145,27 @@ struct SessionRow: View {
                 }
             }
         }
+        .padding(6)
+        .contentShape(Rectangle())
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(isHovered && session.pid > 0 ? 0.3 : 0), lineWidth: 1)
+        )
+        .onHover { hovering in
+            guard session.pid > 0 else { return }
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .onTapGesture {
+            guard session.pid > 0 else { return }
+            Task {
+                await StdinInjector.focusTerminal(forPid: String(session.pid))
+            }
+        }
     }
 }
 
@@ -152,11 +174,12 @@ struct SessionCard: View {
 
     var body: some View {
         let displayed = Array(sessions.prefix(5))
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("Sessions")
                 .font(.caption)
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
 
             if displayed.isEmpty {
                 Text("No recent sessions")
@@ -168,15 +191,12 @@ struct SessionCard: View {
                 ForEach(displayed.indices, id: \.self) { i in
                     SessionRow(
                         session: displayed[i],
-                        isActive: displayed[i].elapsedSeconds > 0
+                        isActive: displayed[i].pid > 0
                     )
-                    if i < displayed.count - 1 {
-                        Divider().opacity(0.3)
-                    }
                 }
             }
         }
-        .padding(14)
+        .padding(10)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
     }
 }

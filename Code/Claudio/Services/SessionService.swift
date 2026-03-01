@@ -38,10 +38,10 @@ actor SessionService {
             }
         }
 
-        // Also include recent indexed sessions not already covered
+        // Also include very recently ended sessions (5 min grace period for final stats)
         let coveredPaths = Set(results.map(\.projectPath))
         let allIndexed = loadAllSessions()
-        let cutoff = Date().addingTimeInterval(-86400)
+        let cutoff = Date().addingTimeInterval(-300)
         for var session in allIndexed {
             if !coveredPaths.contains(session.projectPath),
                let modified = session.modifiedDate, modified > cutoff {

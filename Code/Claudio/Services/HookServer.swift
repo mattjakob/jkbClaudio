@@ -59,6 +59,11 @@ actor HookServer {
         }
     }
 
+    func resolvePermission(id: String, response: HookPermissionResponse) {
+        guard let continuation = pendingPermissions.removeValue(forKey: id) else { return }
+        continuation.resume(returning: response)
+    }
+
     // MARK: - Connection handling
 
     private func handleConnection(_ connection: NWConnection) {

@@ -217,6 +217,85 @@ enum StdinInjector {
         return typeResult
     }
 
+    // MARK: - Focus terminal
+
+    /// Bring the terminal window for a given PID into focus.
+    static func focusTerminal(forPid pid: String) async -> InjectionResult {
+        guard let tty = resolveTTY(pid: pid) else {
+            return .failed("Could not resolve TTY for PID \(pid)")
+        }
+
+        let ttyPath = tty.hasPrefix("/dev/") ? tty : "/dev/\(tty)"
+
+        // 1. tmux — select the pane and switch client
+        if let pane = findTmuxPane(tty: ttyPath) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["tmux", "select-pane", "-t", pane]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do { try process.run(); process.waitUntilExit() } catch {}
+
+            // Also activate the terminal app that hosts tmux
+            let activateTermApp = await focusTerminalApp(ttyPath: ttyPath)
+            if case .success = activateTermApp { return .success }
+            // Even if app focus fails, pane selection may suffice
+            return .success
+        }
+
+        // 2. iTerm2
+        let itermRunning = await isAppRunning("iTerm2")
+        if itermRunning {
+            let script = """
+                tell application "iTerm2"
+                    repeat with w in windows
+                        repeat with t in tabs of w
+                            repeat with s in sessions of t
+                                if tty of s is "\(escaped(ttyPath))" then
+                                    tell t to select
+                                    set index of w to 1
+                                    activate
+                                    return "ok"
+                                end if
+                            end repeat
+                        end repeat
+                    end repeat
+                end tell
+                return "notfound"
+                """
+            let result = await runAppleScriptOnMain(script)
+            if case .success = result { return .success }
+        }
+
+        // 3. Terminal.app
+        let termRunning = await isAppRunning("Terminal")
+        if termRunning {
+            return await focusTerminalApp(ttyPath: ttyPath)
+        }
+
+        return .failed("No supported terminal running for TTY \(ttyPath)")
+    }
+
+    private static func focusTerminalApp(ttyPath: String) async -> InjectionResult {
+        // Try Terminal.app first
+        let script = """
+            tell application "Terminal"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if tty of t is "\(escaped(ttyPath))" then
+                            set selected of t to true
+                            set index of w to 1
+                            activate
+                            return "ok"
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            return "notfound"
+            """
+        return await runAppleScriptOnMain(script)
+    }
+
     // MARK: - Helpers
 
     /// Runs AppleScript on the main thread via NSAppleScript.

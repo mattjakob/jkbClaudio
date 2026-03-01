@@ -18,10 +18,28 @@ final class BridgeCoordinator {
     private var telegram: TelegramService?
     private let hookServer = HookServer()
     private let sessionWatcher = SessionWatcher()
+    private let sdkCoordinator = SDKSessionCoordinator()
 
     private var sessionSlots: [SessionSlot] = []
     private var nextSlotNumber: Int = 1
     private var pendingRouteMessage: String?
+    private var pendingQuestions: [String: PendingQuestion] = [:]
+    private var pendingIdleAsks: [String: PendingIdleAsk] = [:]
+    private var idleAskCounter = 0
+    private var lastIdleAskKey: String?
+
+    /// Tracks a pending AskUserQuestion so callbacks can resolve it with the right answer.
+    private struct PendingQuestion {
+        let permissionId: String
+        let questions: [[String: Any]]   // raw questions array from tool_input
+        let originalInput: [String: AnyCodable]  // full tool_input for updatedInput response
+    }
+
+    /// Tracks a pending idle AskUserQuestion so callbacks can inject the selected option.
+    private struct PendingIdleAsk {
+        let pid: Int
+        let optionCount: Int
+    }
 
     private struct SessionSlot {
         let number: Int
@@ -164,6 +182,8 @@ final class BridgeCoordinator {
         // Bot commands — must be [a-z0-9_], pure digits may be rejected
         try? await telegram?.setMyCommands([
             TGBotCommand(command: "status", description: "System status"),
+            TGBotCommand(command: "new", description: "Spawn a headless session"),
+            TGBotCommand(command: "stop", description: "Stop a spawned session"),
             TGBotCommand(command: "start", description: "Show help")
         ])
         try? await telegram?.setMyDescription("Claudio — monitor and control Claude Code sessions.")
@@ -175,6 +195,11 @@ final class BridgeCoordinator {
 
         await sessionWatcher.setOnNewLine { [weak self] line in
             await self?.handleWatchedLine(line)
+        }
+
+        await sdkCoordinator.setOnTelegramSend { [weak self] (text: String, markup: TGInlineKeyboardMarkup?) in
+            guard let self else { return }
+            await self.telegram?.send(text, replyMarkup: markup)
         }
 
         var hookStarted = true
@@ -259,11 +284,13 @@ final class BridgeCoordinator {
         let currentlyWatched = await sessionWatcher.watchedPaths
 
         // Update session slots — keep existing numbers, assign new ones, prune ended
-        let activeProjectPaths = Set(sessions.map(\.projectPath))
+        // Only keep slots for sessions with a running process
+        let activeSessions = sessions.filter { $0.pid > 0 }
+        let activeProjectPaths = Set(activeSessions.map(\.projectPath))
         var keptSlots: [SessionSlot] = []
         for slot in sessionSlots {
             if activeProjectPaths.contains(slot.cwd) {
-                if let session = sessions.first(where: { $0.projectPath == slot.cwd }) {
+                if let session = activeSessions.first(where: { $0.projectPath == slot.cwd }) {
                     keptSlots.append(SessionSlot(
                         number: slot.number, name: session.projectName,
                         pid: session.pid, jsonlPath: session.fullPath,
@@ -279,7 +306,7 @@ final class BridgeCoordinator {
         }
         let keptCwds = Set(keptSlots.map(\.cwd))
         let takenNumbers = Set(keptSlots.map(\.number))
-        for session in sessions where !keptCwds.contains(session.projectPath) {
+        for session in activeSessions where !keptCwds.contains(session.projectPath) {
             // Find next available slot number (skip already-taken)
             var n = nextSlotNumber
             var attempts = 0
@@ -314,15 +341,22 @@ final class BridgeCoordinator {
 
         switch event.hookEventName {
         case "PermissionRequest":
-            let tag = slotTag(from: event.cwd, emoji: "\u{26A1}\u{FE0F}")
+            let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{26A1}\u{FE0F}")
             let tool = event.toolName ?? "Unknown"
-            let input = formatToolInput(event.toolInput)
-            let text = "\(tag)\n<pre>Tool: \(escapeHTML(tool))\n\(input)</pre>"
-            let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
-                TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
-                TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
-            ]])
-            await telegram.send(text, replyMarkup: keyboard)
+
+            if tool == "AskUserQuestion" {
+                await handleAskUserQuestion(event, tag: tag, permissionId: permissionId)
+            } else if tool == "ExitPlanMode" {
+                await handleExitPlanMode(event, tag: tag, permissionId: permissionId)
+            } else {
+                let input = formatToolInput(event.toolInput)
+                let text = "\(tag)\n<pre>Tool: \(escapeHTML(tool))\n\(input)</pre>"
+                let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
+                    TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
+                    TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
+                ]])
+                await telegram.send(text, replyMarkup: keyboard)
+            }
 
         case "Notification":
             let type = event.notificationType ?? ""
@@ -330,6 +364,17 @@ final class BridgeCoordinator {
             switch type {
             case "idle_prompt":
                 guard isFilterEnabled(.inputNeeded) else { return }
+                if let tp = event.transcriptPath,
+                   let questions = extractAskFromTranscript(tp) {
+                    let key = "\(tp):\(questions.first?["question"] as? String ?? "")"
+                    guard key != lastIdleAskKey else { return }
+                    lastIdleAskKey = key
+                    await handleIdleAskUserQuestion(event: event, questions: questions)
+                    return
+                }
+                let genericKey = "idle:\(event.transcriptPath ?? event.cwd ?? "")"
+                guard genericKey != lastIdleAskKey else { return }
+                lastIdleAskKey = genericKey
                 emoji = "\u{1F955}"
             case "elicitation_dialog":
                 guard isFilterEnabled(.questions) else { return }
@@ -344,7 +389,7 @@ final class BridgeCoordinator {
                 guard isFilterEnabled(.inputNeeded) else { return }
                 emoji = "\u{1F338}"
             }
-            let tag = slotTag(from: event.cwd, emoji: emoji)
+            let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: emoji)
             let title = event.title
             let msg = event.message ?? ""
             let body = [title, msg.isEmpty ? nil : msg]
@@ -353,19 +398,144 @@ final class BridgeCoordinator {
             await telegram.send("\(tag)\n<pre>\(escapeHTML(body))</pre>")
 
         case "Stop":
-            let tag = slotTag(from: event.cwd, emoji: "\u{1FAD6}")
+            let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{1FAD6}")
             await telegram.send(tag)
 
         case "SessionStart":
-            let tag = slotTag(from: event.cwd, emoji: "\u{2615}\u{FE0F}")
+            let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{2615}\u{FE0F}")
             await telegram.send(tag)
 
         case "SessionEnd":
-            let tag = slotTag(from: event.cwd, emoji: "\u{1F36D}")
+            let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{1F36D}")
             await telegram.send(tag)
 
         default:
             break
+        }
+    }
+
+    // MARK: - AskUserQuestion / ExitPlanMode
+
+    private func handleAskUserQuestion(_ event: HookEvent, tag: String, permissionId: String) async {
+        guard let telegram else { return }
+
+        // Extract questions array from tool_input
+        let questionsRaw = extractQuestionsArray(from: event.toolInput)
+        guard !questionsRaw.isEmpty else {
+            // Fallback to generic approve/deny if we can't parse
+            let text = "\(tag)\n<pre>Question from Claude</pre>"
+            let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
+                TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
+                TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
+            ]])
+            await telegram.send(text, replyMarkup: keyboard)
+            return
+        }
+
+        // Store for callback resolution
+        pendingQuestions[permissionId] = PendingQuestion(
+            permissionId: permissionId,
+            questions: questionsRaw,
+            originalInput: event.toolInput ?? [:]
+        )
+
+        // For each question, send a message with inline keyboard options
+        for (qIdx, question) in questionsRaw.enumerated() {
+            let questionText = question["question"] as? String ?? "Choose an option"
+            let options = question["options"] as? [[String: Any]] ?? []
+
+            guard !options.isEmpty else { continue }
+
+            var buttons: [TGInlineKeyboardButton] = []
+            for (oIdx, option) in options.enumerated() {
+                let label = option["label"] as? String ?? "Option \(oIdx + 1)"
+                buttons.append(TGInlineKeyboardButton(
+                    text: label,
+                    callbackData: "ask_\(permissionId)_\(qIdx)_\(oIdx)"
+                ))
+            }
+
+            // Stack buttons vertically (one per row) for readability
+            let rows = buttons.map { [$0] }
+            let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: rows)
+            let text = "\(tag)\n<b>\(escapeHTML(questionText))</b>"
+            await telegram.send(text, replyMarkup: keyboard)
+        }
+    }
+
+    private func handleExitPlanMode(_ event: HookEvent, tag: String, permissionId: String) async {
+        guard let telegram else { return }
+
+        // Extract plan text from tool_input
+        var planExcerpt = ""
+        if let input = event.toolInput,
+           case .string(let plan) = input["plan"] {
+            planExcerpt = plan.count > 800 ? String(plan.prefix(800)) + "..." : plan
+        }
+
+        // Extract allowedPrompts descriptions if available
+        var promptDescriptions: [String] = []
+        if let input = event.toolInput,
+           case .array(let prompts) = input["allowedPrompts"] {
+            for prompt in prompts {
+                if case .object(let obj) = prompt,
+                   case .string(let desc) = obj["prompt"] {
+                    promptDescriptions.append(desc)
+                }
+            }
+        }
+
+        var text = "\(tag)\n<b>Plan ready to execute</b>"
+        if !planExcerpt.isEmpty {
+            text += "\n<pre>\(escapeHTML(planExcerpt))</pre>"
+        }
+        if !promptDescriptions.isEmpty {
+            let perms = promptDescriptions.map { "• \(escapeHTML($0))" }.joined(separator: "\n")
+            text += "\n<b>Requested permissions:</b>\n\(perms)"
+        }
+
+        let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
+            TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
+            TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
+        ]])
+        await telegram.send(text, replyMarkup: keyboard)
+    }
+
+    /// Extracts the questions array from AskUserQuestion tool_input.
+    private func extractQuestionsArray(from input: [String: AnyCodable]?) -> [[String: Any]] {
+        guard let input, case .array(let questions) = input["questions"] else { return [] }
+        return questions.compactMap { item -> [String: Any]? in
+            guard case .object(let obj) = item else { return nil }
+            return anyCodableToDict(obj)
+        }
+    }
+
+    /// Converts AnyCodable dictionary to plain [String: Any] for easier access.
+    private func anyCodableToDict(_ obj: [String: AnyCodable]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (key, value) in obj {
+            switch value {
+            case .string(let s): result[key] = s
+            case .int(let i): result[key] = i
+            case .double(let d): result[key] = d
+            case .bool(let b): result[key] = b
+            case .array(let arr): result[key] = arr.map(anyCodableToAny)
+            case .object(let o): result[key] = anyCodableToDict(o)
+            case .null: break
+            }
+        }
+        return result
+    }
+
+    private func anyCodableToAny(_ value: AnyCodable) -> Any {
+        switch value {
+        case .string(let s): return s
+        case .int(let i): return i
+        case .double(let d): return d
+        case .bool(let b): return b
+        case .array(let arr): return arr.map(anyCodableToAny)
+        case .object(let o): return anyCodableToDict(o)
+        case .null: return NSNull()
         }
     }
 
@@ -423,8 +593,13 @@ final class BridgeCoordinator {
     }
 
     private func handleTextCommand(_ text: String) async {
-        // /N message — send to session N
+        // /N message — check SDK sessions first, then terminal sessions
         if let (slotNum, message) = parseSlotCommand(text) {
+            if let sdkSessionId = await sdkCoordinator.findBySlotNumber(slotNum) {
+                await sdkCoordinator.sendUserMessage(message, sessionId: sdkSessionId)
+                await telegram?.send("Sent to spawned session \(slotNum)")
+                return
+            }
             guard let slot = findSlot(byNumber: slotNum) else {
                 await telegram?.send("Session \(slotNum) not found")
                 return
@@ -437,49 +612,136 @@ final class BridgeCoordinator {
             return
         }
 
+        if text.hasPrefix("/new ") {
+            await handleNewCommand(String(text.dropFirst(5)))
+            return
+        }
+
+        if text.hasPrefix("/stop ") {
+            await handleStopCommand(String(text.dropFirst(6)))
+            return
+        }
+
         if text == "/status" {
-            let header = "\u{2728} <b>STATUS</b> \u{2728}"
-            if sessionSlots.isEmpty {
-                await telegram?.send("\(header)\n\nNo active sessions")
-            } else {
-                let maxName = 10
-                struct Row {
-                    let label: String; let name: String; let agents: String; let state: String
-                }
-                let rows: [Row] = sessionSlots.map { slot in
-                    let name = slot.name.count > maxName
-                        ? String(slot.name.prefix(maxName - 1)) + "\u{2026}"
-                        : slot.name
-                    let total = slot.subagentCount + 1
-                    let agents = total == 1 ? "1 agent" : "\(total) agents"
-                    let state = slot.cpuPercent > 5
-                        ? friendlyElapsed(slot.elapsedSeconds)
-                        : "idle"
-                    return Row(label: slotLabel(slot.number), name: name, agents: agents, state: state)
-                }
-                let nameW = rows.map(\.name.count).max() ?? 0
-                let agentW = rows.map(\.agents.count).max() ?? 0
-                var body: [String] = []
-                for row in rows {
-                    let n = row.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
-                    let a = row.agents.padding(toLength: agentW, withPad: " ", startingAt: 0)
-                    body.append("\(row.label) \(escapeHTML(n)) | \(a) | \(row.state)")
-                }
-                body.append("\nUse /[N] [MESSAGE] to send a message directly to an agent")
-                await telegram?.send("\(header)\n<pre>\(body.joined(separator: "\n"))</pre>")
-            }
+            await handleStatusCommand()
         } else if text == "/start" {
             await telegram?.send(
                 "\u{1F3C0}\u{1F94E}\u{26BD}\u{FE0F} <b>CLAUDIO</b> \u{26BD}\u{FE0F}\u{1F94E}\u{1F3C0}\n\n" +
                 "<pre>Commands:\n" +
                 "/status        active sessions\n" +
+                "/new [PROMPT]  spawn headless session\n" +
+                "/stop [N]      stop spawned session\n" +
                 "/[N] [MESSAGE] sends to agent\n" +
                 "[MESSAGE]      interactive</pre>"
             )
         } else if !text.hasPrefix("/") {
-            // Bare message — route to last active session or prompt
             await routeBareMessage(text)
         }
+    }
+
+    // MARK: - /new command
+
+    private func handleNewCommand(_ args: String) async {
+        let trimmed = args.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            await telegram?.send("Usage: /new &lt;prompt&gt; or /new /path prompt")
+            return
+        }
+
+        var cwd: String
+        var prompt: String
+
+        if trimmed.hasPrefix("/") {
+            // /new /path/to/project prompt text
+            let parts = trimmed.split(separator: " ", maxSplits: 1)
+            if parts.count == 2 {
+                cwd = String(parts[0])
+                prompt = String(parts[1])
+            } else {
+                cwd = FileManager.default.homeDirectoryForCurrentUser.path
+                prompt = trimmed
+            }
+        } else {
+            cwd = FileManager.default.homeDirectoryForCurrentUser.path
+            prompt = trimmed
+        }
+
+        // Verify cwd exists
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir) || !isDir.boolValue {
+            await telegram?.send("Directory not found: \(escapeHTML(cwd))")
+            return
+        }
+
+        do {
+            let sessionId = try await sdkCoordinator.spawnSession(prompt: prompt, cwd: cwd)
+            _ = sessionId // session ID tracked internally
+        } catch {
+            await telegram?.send("Failed to spawn: \(escapeHTML(error.localizedDescription))")
+        }
+    }
+
+    // MARK: - /stop command
+
+    private func handleStopCommand(_ args: String) async {
+        let trimmed = args.trimmingCharacters(in: .whitespaces)
+        guard let n = Int(trimmed), n >= 1 else {
+            await telegram?.send("Usage: /stop &lt;N&gt;")
+            return
+        }
+
+        guard let sessionId = await sdkCoordinator.findBySlotNumber(n) else {
+            await telegram?.send("No spawned session \(n)")
+            return
+        }
+
+        await sdkCoordinator.interruptSession(sessionId)
+        await telegram?.send("Interrupted session \(n)")
+    }
+
+    // MARK: - /status command
+
+    private func handleStatusCommand() async {
+        let header = "\u{2728} <b>STATUS</b> \u{2728}"
+        let sdkSessions = await sdkCoordinator.activeSessions()
+
+        if sessionSlots.isEmpty && sdkSessions.isEmpty {
+            await telegram?.send("\(header)\n\nNo active sessions")
+            return
+        }
+
+        let maxName = 10
+        struct Row {
+            let label: String; let name: String; let detail: String; let state: String
+        }
+        var rows: [Row] = sessionSlots.map { slot in
+            let name = slot.name.count > maxName
+                ? String(slot.name.prefix(maxName - 1)) + "\u{2026}"
+                : slot.name
+            let total = slot.subagentCount + 1
+            let agents = total == 1 ? "1 agent" : "\(total) agents"
+            let state = slot.cpuPercent > 5
+                ? friendlyElapsed(slot.elapsedSeconds)
+                : "idle"
+            return Row(label: slotLabel(slot.number), name: name, detail: agents, state: state)
+        }
+        for sdk in sdkSessions {
+            let name = sdk.projectName.count > maxName
+                ? String(sdk.projectName.prefix(maxName - 1)) + "\u{2026}"
+                : sdk.projectName
+            rows.append(Row(label: "\(sdk.slotNumber)", name: name, detail: "spawned", state: "active"))
+        }
+
+        let nameW = rows.map(\.name.count).max() ?? 0
+        let detailW = rows.map(\.detail.count).max() ?? 0
+        var body: [String] = []
+        for row in rows {
+            let n = row.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
+            let d = row.detail.padding(toLength: detailW, withPad: " ", startingAt: 0)
+            body.append("\(row.label) \(escapeHTML(n)) | \(d) | \(row.state)")
+        }
+        body.append("\nUse /[N] [MESSAGE] to send a message to an agent")
+        await telegram?.send("\(header)\n<pre>\(body.joined(separator: "\n"))</pre>")
     }
 
     private func routeBareMessage(_ text: String) async {
@@ -514,7 +776,30 @@ final class BridgeCoordinator {
     private func handleCallback(_ callback: TGCallbackQuery) async {
         guard let data = callback.data else { return }
 
-        if data.hasPrefix("perm_allow_") || data.hasPrefix("perm_deny_") {
+        // SDK spawned session callbacks
+        if data.hasPrefix("sdk_allow_") || data.hasPrefix("sdk_deny_") {
+            let allow = data.hasPrefix("sdk_allow_")
+            let permId = String(data.dropFirst(allow ? 10 : 9))
+            await sdkCoordinator.resolvePermission(permId: permId, allow: allow)
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: allow ? "Approved" : "Denied")
+            if let msg = callback.message {
+                try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
+            }
+            return
+        }
+
+        if data.hasPrefix("sdkask_") {
+            await handleSdkAskCallback(callback, data: data)
+            return
+        }
+
+        if data.hasPrefix("idle_") {
+            await handleIdleAskCallback(callback, data: data)
+            return
+        } else if data.hasPrefix("ask_") {
+            await handleAskCallback(callback, data: data)
+            return
+        } else if data.hasPrefix("perm_allow_") || data.hasPrefix("perm_deny_") {
             let allow = data.hasPrefix("perm_allow_")
             let permId = String(data.dropFirst(allow ? 11 : 10))
             await hookServer.resolvePermission(id: permId, allow: allow)
@@ -537,6 +822,216 @@ final class BridgeCoordinator {
             }
             await injectToSlot(slot, message: message)
         }
+    }
+
+    /// Handles callback from AskUserQuestion inline keyboard.
+    /// Callback data format: "ask_{permissionId}_{questionIndex}_{optionIndex}"
+    private func handleAskCallback(_ callback: TGCallbackQuery, data: String) async {
+        // Callback data: "ask_perm_N_qIdx_oIdx"
+        // permId contains underscores (e.g. "perm_3"), so split from the end
+        let components = data.components(separatedBy: "_")
+        guard components.count >= 4,
+              let oIdx = Int(components.last!),
+              let qIdx = Int(components[components.count - 2]) else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Invalid")
+            return
+        }
+        // permId is everything between "ask_" and the last two "_N_N" segments
+        let permId = components[1..<(components.count - 2)].joined(separator: "_")
+
+        guard let pending = pendingQuestions[permId] else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Expired")
+            return
+        }
+
+        guard qIdx < pending.questions.count else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Invalid question")
+            return
+        }
+
+        let question = pending.questions[qIdx]
+        let questionText = question["question"] as? String ?? ""
+        let options = question["options"] as? [[String: Any]] ?? []
+
+        guard oIdx < options.count else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Invalid option")
+            return
+        }
+
+        let selectedLabel = options[oIdx]["label"] as? String ?? ""
+
+        // Build answers dict: map question text → selected label
+        var answers: [String: AnyCodable] = [:]
+        if case .object(let existingAnswers) = pending.originalInput["answers"] {
+            answers = existingAnswers
+        }
+        answers[questionText] = .string(selectedLabel)
+
+        // Rebuild the full tool_input with answers filled in
+        var updatedInput = pending.originalInput
+        updatedInput["answers"] = .object(answers)
+
+        // For single-question flows, resolve immediately
+        // For multi-question, we'd need to track partial answers — keep it simple for now
+        pendingQuestions.removeValue(forKey: permId)
+        let response = HookPermissionResponse.allowWithInput(
+            updatedInput.reduce(into: [:]) { $0[$1.key] = $1.value }
+        )
+        await hookServer.resolvePermission(id: permId, response: response)
+
+        try? await telegram?.answerCallbackQuery(id: callback.id, text: selectedLabel)
+        if let msg = callback.message {
+            try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
+        }
+    }
+
+    // MARK: - SDK AskUserQuestion callback
+
+    /// Handles callback from SDK AskUserQuestion inline keyboard.
+    /// Callback data format: "sdkask_{permId}_{questionIndex}_{optionIndex}"
+    private func handleSdkAskCallback(_ callback: TGCallbackQuery, data: String) async {
+        // Format: "sdkask_sdk_N_qIdx_oIdx"
+        // permId contains underscores (e.g. "sdk_3"), so split from the end
+        let components = data.components(separatedBy: "_")
+        guard components.count >= 4,
+              let oIdx = Int(components.last!),
+              let qIdx = Int(components[components.count - 2]) else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Invalid")
+            return
+        }
+        // permId is everything between "sdkask_" and the last two "_N_N" segments
+        let permId = components[1..<(components.count - 2)].joined(separator: "_")
+
+        // Build updatedInput with the selected answer
+        let updatedInput: [String: Any] = [
+            "answers": [
+                "question": "\(qIdx)",
+                "selected": "\(oIdx)"
+            ]
+        ]
+        await sdkCoordinator.resolvePermissionWithInput(permId: permId, updatedInput: updatedInput)
+
+        let label = "Option \(oIdx + 1)"
+        try? await telegram?.answerCallbackQuery(id: callback.id, text: label)
+        if let msg = callback.message {
+            try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
+        }
+    }
+
+    // MARK: - Idle AskUserQuestion (from JSONL transcript)
+
+    /// Sends inline keyboard buttons for an AskUserQuestion found in the JSONL transcript.
+    private func handleIdleAskUserQuestion(event: HookEvent, questions: [[String: Any]]) async {
+        guard let telegram else { return }
+        guard let slot = findSlot(byCwd: event.cwd, transcriptPath: event.transcriptPath) else { return }
+        let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{1F430}")
+
+        for question in questions {
+            let questionText = question["question"] as? String ?? "Choose an option"
+            let options = question["options"] as? [[String: Any]] ?? []
+            guard !options.isEmpty else { continue }
+
+            idleAskCounter += 1
+            let askId = String(idleAskCounter)
+            pendingIdleAsks[askId] = PendingIdleAsk(pid: slot.pid, optionCount: options.count)
+
+            var buttons: [TGInlineKeyboardButton] = []
+            for (oIdx, option) in options.enumerated() {
+                let label = option["label"] as? String ?? "Option \(oIdx + 1)"
+                buttons.append(TGInlineKeyboardButton(
+                    text: label,
+                    callbackData: "idle_\(askId)_\(oIdx)"
+                ))
+            }
+
+            let rows = buttons.map { [$0] }
+            let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: rows)
+            let text = "\(tag)\n<b>\(escapeHTML(questionText))</b>"
+            await telegram.send(text, replyMarkup: keyboard)
+        }
+    }
+
+    /// Handles callback from idle AskUserQuestion inline keyboard.
+    /// Injects the 1-based option number into the session terminal.
+    private func handleIdleAskCallback(_ callback: TGCallbackQuery, data: String) async {
+        // Format: "idle_{askId}_{optionIndex}"
+        let components = data.components(separatedBy: "_")
+        guard components.count == 3,
+              let oIdx = Int(components[2]),
+              let pending = pendingIdleAsks[components[1]] else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Expired")
+            return
+        }
+
+        guard oIdx < pending.optionCount else {
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Invalid")
+            return
+        }
+
+        let askId = components[1]
+        pendingIdleAsks.removeValue(forKey: askId)
+
+        // Inject 1-based option number into terminal
+        let optionNumber = String(oIdx + 1)
+        let result = await StdinInjector.inject(text: optionNumber, forPid: String(pending.pid))
+
+        switch result {
+        case .success:
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Option \(oIdx + 1)")
+        case .failed(let err):
+            try? await telegram?.answerCallbackQuery(id: callback.id, text: "Failed: \(err)")
+        }
+        if let msg = callback.message {
+            try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
+        }
+    }
+
+    /// Read the last 16KB of a JSONL transcript and find the last actionable tool_use block
+    /// (AskUserQuestion or ExitPlanMode).
+    private func extractAskFromTranscript(_ path: String) -> [[String: Any]]? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+
+        let fileSize = fh.seekToEndOfFile()
+        let readSize: UInt64 = min(fileSize, 16384)
+        fh.seek(toFileOffset: fileSize - readSize)
+        let data = fh.readDataToEndOfFile()
+
+        guard let chunk = String(data: data, encoding: .utf8) else { return nil }
+        let lines = chunk.components(separatedBy: "\n").reversed()
+
+        for line in lines {
+            guard !line.isEmpty,
+                  let lineData = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else { continue }
+
+            let type = obj["type"] as? String ?? ""
+            guard type == "assistant" else { continue }
+
+            guard let message = obj["message"] as? [String: Any],
+                  let content = message["content"] as? [[String: Any]] else { continue }
+
+            for block in content.reversed() {
+                guard block["type"] as? String == "tool_use" else { continue }
+                let name = block["name"] as? String ?? ""
+
+                if name == "AskUserQuestion",
+                   let input = block["input"] as? [String: Any],
+                   let questions = input["questions"] as? [[String: Any]],
+                   !questions.isEmpty {
+                    return questions
+                }
+
+                if name == "ExitPlanMode" {
+                    return [["question": "Plan ready to execute", "options": [
+                        ["label": "Clear context + bypass"],
+                        ["label": "Bypass permissions"],
+                        ["label": "Manually approve"]
+                    ]]]
+                }
+            }
+        }
+        return nil
     }
 
     // MARK: - Hook installation
@@ -604,6 +1099,8 @@ final class BridgeCoordinator {
         // 2. Set bot commands and description
         try? await telegram.setMyCommands([
             TGBotCommand(command: "status", description: "System status"),
+            TGBotCommand(command: "new", description: "Spawn a headless session"),
+            TGBotCommand(command: "stop", description: "Stop a spawned session"),
             TGBotCommand(command: "start", description: "Show help")
         ])
         try? await telegram.setMyDescription("Claudio — monitor and control Claude Code sessions.")
@@ -718,14 +1215,12 @@ final class BridgeCoordinator {
         "\(((n - 1) % 9) + 1)"
     }
 
-    /// Build display tag for a specific event type from a cwd path (hook events).
-    private func slotTag(from cwd: String?, emoji: String) -> String {
-        guard let cwd else { return "Unknown" }
-        let name = URL(fileURLWithPath: cwd).lastPathComponent
-        if let slot = sessionSlots.first(where: { $0.cwd == cwd })
-            ?? sessionSlots.first(where: { $0.name == name }) {
+    /// Build display tag for a hook event from cwd and/or transcriptPath.
+    private func slotTag(from cwd: String?, transcriptPath: String? = nil, emoji: String) -> String {
+        if let slot = findSlot(byCwd: cwd, transcriptPath: transcriptPath) {
             return "\(emoji) <b>\(slotLabel(slot.number)) | \(escapeHTML(slot.name))</b> \(emoji)"
         }
+        let name = cwd.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Unknown"
         return "\(emoji) <b>\(escapeHTML(name))</b> \(emoji)"
     }
 
@@ -740,6 +1235,36 @@ final class BridgeCoordinator {
 
     private func findSlot(byNumber n: Int) -> SessionSlot? {
         sessionSlots.first(where: { $0.number == n })
+    }
+
+    /// Find a session slot by matching transcriptPath or cwd with multiple strategies.
+    private func findSlot(byCwd cwd: String?, transcriptPath: String?) -> SessionSlot? {
+        // 1. Match by transcriptPath → jsonlPath (most reliable)
+        if let tp = transcriptPath {
+            let stdTP = (tp as NSString).standardizingPath
+            if let slot = sessionSlots.first(where: { ($0.jsonlPath as NSString).standardizingPath == stdTP }) {
+                return slot
+            }
+        }
+        guard let cwd else { return nil }
+        let stdCwd = (cwd as NSString).standardizingPath
+
+        // 2. Exact standardized cwd match
+        if let slot = sessionSlots.first(where: { ($0.cwd as NSString).standardizingPath == stdCwd }) {
+            return slot
+        }
+
+        // 3. Parent/child containment check
+        if let slot = sessionSlots.first(where: {
+            let stdSlotCwd = ($0.cwd as NSString).standardizingPath
+            return stdCwd.hasPrefix(stdSlotCwd + "/") || stdSlotCwd.hasPrefix(stdCwd + "/")
+        }) {
+            return slot
+        }
+
+        // 4. lastPathComponent name match
+        let name = URL(fileURLWithPath: stdCwd).lastPathComponent
+        return sessionSlots.first(where: { $0.name == name })
     }
 
     /// Parse "/1 hello" → (1, "hello"). Returns nil if no message body.

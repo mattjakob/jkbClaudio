@@ -94,6 +94,7 @@ struct HookPermissionResponse: Codable, Sendable {
         struct Decision: Codable, Sendable {
             let behavior: String
             let message: String?
+            let updatedInput: [String: AnyCodable]?
         }
     }
 
@@ -101,7 +102,7 @@ struct HookPermissionResponse: Codable, Sendable {
         HookPermissionResponse(
             hookSpecificOutput: HookSpecificOutput(
                 hookEventName: "PermissionRequest",
-                decision: HookSpecificOutput.Decision(behavior: "allow", message: nil)
+                decision: HookSpecificOutput.Decision(behavior: "allow", message: nil, updatedInput: nil)
             )
         )
     }
@@ -110,7 +111,16 @@ struct HookPermissionResponse: Codable, Sendable {
         HookPermissionResponse(
             hookSpecificOutput: HookSpecificOutput(
                 hookEventName: "PermissionRequest",
-                decision: HookSpecificOutput.Decision(behavior: "deny", message: message)
+                decision: HookSpecificOutput.Decision(behavior: "deny", message: message, updatedInput: nil)
+            )
+        )
+    }
+
+    static func allowWithInput(_ input: [String: AnyCodable]) -> HookPermissionResponse {
+        HookPermissionResponse(
+            hookSpecificOutput: HookSpecificOutput(
+                hookEventName: "PermissionRequest",
+                decision: HookSpecificOutput.Decision(behavior: "allow", message: nil, updatedInput: input)
             )
         )
     }

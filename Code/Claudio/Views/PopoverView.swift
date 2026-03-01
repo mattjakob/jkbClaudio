@@ -2,7 +2,7 @@ import SwiftUI
 
 struct PopoverView: View {
     @Bindable var viewModel: AppViewModel
-    @State private var scrollID: Bool?
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showSettings = false
 
     var body: some View {
@@ -32,8 +32,15 @@ struct PopoverView: View {
                 .padding(16)
                 .id(true)
             }
-            .onAppear {
-                proxy.scrollTo(true, anchor: .top)
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    proxy.scrollTo(true, anchor: .top)
+                }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                showSettings = false
             }
         }
     }

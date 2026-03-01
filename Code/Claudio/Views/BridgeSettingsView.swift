@@ -59,14 +59,16 @@ struct BridgeSettingsView: View {
             Button {
                 onBack()
             } label: {
-                Image(systemName: "chevron.left")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("Settings")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
             }
             .buttonStyle(.plain)
-
-            Text("Settings")
-                .font(.title3.weight(.semibold))
 
             Spacer()
         }
