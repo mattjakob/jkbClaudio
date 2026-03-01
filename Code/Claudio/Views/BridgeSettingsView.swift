@@ -20,8 +20,10 @@ struct BridgeSettingsView: View {
                         // Fully configured — compact view
                         statusCard
                             .padding(.bottom, 12)
+                        notificationsCard
+                            .padding(.bottom, 12)
                         helpCard(
-                            "Commands: /status, /run {project} {prompt}, /stop. Session output is forwarded automatically when hooks are installed."
+                            "Commands: /status, /1 msg, /2 msg. Session output and events are forwarded automatically."
                         )
                         .padding(.bottom, 12)
                     } else {
@@ -190,10 +192,14 @@ struct BridgeSettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
-                        Button("Install Hooks") { bridge.installHooks() }
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.blue)
-                            .buttonStyle(.plain)
+                        Button("Install Hooks") {
+                            bridge.installHooks()
+                            Task { await bridge.finalizeSetup() }
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.blue)
+                        .buttonStyle(.plain)
+                        .disabled(bridge.isFinalizingSetup)
                     }
                 }
             }
@@ -273,6 +279,53 @@ struct BridgeSettingsView: View {
         }
         .padding(.vertical, 4)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    // MARK: - Notifications
+
+    private var notificationsCard: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Notifications")
+                    .font(.callout.weight(.medium))
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+
+            ForEach(Array(BridgeCoordinator.MessageFilter.allCases.enumerated()), id: \.element) { index, filter in
+                if index > 0 { rowDivider }
+                filterRow(filter)
+            }
+        }
+        .padding(.vertical, 4)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func filterRow(_ filter: BridgeCoordinator.MessageFilter) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: filter.icon)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(filter.label)
+                    .font(.caption)
+                Text(filter.subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { bridge.isFilterEnabled(filter) },
+                set: { bridge.setFilter(filter, enabled: $0) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
     }
 
     // MARK: - Reusable pieces

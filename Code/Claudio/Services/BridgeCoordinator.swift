@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 @Observable
@@ -9,6 +10,8 @@ final class BridgeCoordinator {
     var chatId: Int = 0
     var hooksInstalled = false
     var lastBridgeError: String?
+    var isFinalizingSetup = false
+    var disabledFilters: Set<String> = []
 
     private var telegram: TelegramService?
     private let hookServer = HookServer()
@@ -29,12 +32,85 @@ final class BridgeCoordinator {
     private static let tokenKey = "bridge_bot_token"
     private static let chatIdKey = "bridge_chat_id"
     private static let enabledKey = "bridge_enabled"
+    private static let filtersKey = "bridge_disabled_filters"
     private static let hookPort: UInt16 = 19876
+
+    // MARK: - Message filters
+
+    enum MessageFilter: String, CaseIterable, Sendable {
+        case permissionRequests
+        case inputNeeded
+        case questions
+        case agentFinished
+        case sessions
+        case sessionOutput
+
+        var label: String {
+            switch self {
+            case .permissionRequests: "Permission Requests"
+            case .inputNeeded: "Input Needed"
+            case .questions: "Questions"
+            case .agentFinished: "Agent Finished"
+            case .sessions: "Sessions"
+            case .sessionOutput: "Session Output"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .permissionRequests: "lock.shield"
+            case .inputNeeded: "exclamationmark.bubble"
+            case .questions: "questionmark.bubble"
+            case .agentFinished: "stop.circle"
+            case .sessions: "play.circle"
+            case .sessionOutput: "text.bubble"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .permissionRequests: "Approve or deny tool usage"
+            case .inputNeeded: "Agent is waiting for input"
+            case .questions: "Agent is asking a question"
+            case .agentFinished: "Agent has stopped"
+            case .sessions: "Session started or ended"
+            case .sessionOutput: "Live text from sessions"
+            }
+        }
+    }
+
+    func isFilterEnabled(_ filter: MessageFilter) -> Bool {
+        !disabledFilters.contains(filter.rawValue)
+    }
+
+    func setFilter(_ filter: MessageFilter, enabled: Bool) {
+        if enabled {
+            disabledFilters.remove(filter.rawValue)
+        } else {
+            disabledFilters.insert(filter.rawValue)
+        }
+        UserDefaults.standard.set(Array(disabledFilters), forKey: Self.filtersKey)
+        // Sync hooks to match new filter state
+        if hooksInstalled { syncHooks() }
+    }
+
+    /// Returns true if the given hook event is needed based on current filter state.
+    private func isHookNeeded(_ event: String) -> Bool {
+        switch event {
+        case "PermissionRequest": return isFilterEnabled(.permissionRequests)
+        case "Notification": return isFilterEnabled(.inputNeeded) || isFilterEnabled(.questions)
+        case "Stop": return isFilterEnabled(.agentFinished)
+        case "SessionStart", "SessionEnd": return isFilterEnabled(.sessions)
+        default: return false
+        }
+    }
 
     init() {
         botToken = UserDefaults.standard.string(forKey: Self.tokenKey) ?? ""
         chatId = UserDefaults.standard.integer(forKey: Self.chatIdKey)
         isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
+        let saved = UserDefaults.standard.stringArray(forKey: Self.filtersKey) ?? []
+        disabledFilters = Set(saved)
     }
 
     // MARK: - Lifecycle
@@ -192,6 +268,14 @@ final class BridgeCoordinator {
 
         case "Notification":
             let type = event.notificationType ?? ""
+            switch type {
+            case "idle_prompt":
+                guard isFilterEnabled(.inputNeeded) else { return }
+            case "elicitation_dialog":
+                guard isFilterEnabled(.questions) else { return }
+            default:
+                guard isFilterEnabled(.inputNeeded) else { return }
+            }
             let title = event.title
             let msg = event.message ?? ""
             let body = [title, msg.isEmpty ? nil : msg]
@@ -223,6 +307,7 @@ final class BridgeCoordinator {
     // MARK: - JSONL watcher -> Telegram
 
     private func handleWatchedLine(_ line: WatchedLine) async {
+        guard isFilterEnabled(.sessionOutput) else { return }
         guard let telegram else { return }
         guard let obj = try? JSONSerialization.jsonObject(with: line.jsonLine) as? [String: Any] else { return }
         let type = obj["type"] as? String ?? ""
@@ -331,18 +416,25 @@ final class BridgeCoordinator {
         ("SessionEnd",        "/hook/session-end", nil)
     ]
 
-    /// Installs native HTTP hooks into ~/.claude/settings.json.
-    /// Removes any stale Claudio hooks (old command-style or HTTP) before adding fresh ones.
+    /// Installs hooks into ~/.claude/settings.json based on current filter state.
     func installHooks() {
+        syncHooks()
+        hooksInstalled = true
+    }
+
+    /// Syncs ~/.claude/settings.json hooks to match current filter state.
+    /// Only installs hooks for enabled filters. Removes hooks for disabled ones.
+    private func syncHooks() {
         var settings = readSettings()
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
-        // Remove any existing Claudio hooks first (handles migration from command→http)
+        // Remove all Claudio hooks first (clean slate)
         stripOurHooks(&hooks)
 
-        // Install fresh HTTP hooks
+        // Re-add only hooks for enabled filters
         let baseURL = "http://localhost:\(Self.hookPort)"
         for (event, path, timeout) in Self.hookEvents {
+            guard isHookNeeded(event) else { continue }
             var hookDef: [String: Any] = ["type": "http", "url": "\(baseURL)\(path)"]
             if let timeout { hookDef["timeout"] = timeout }
             let entry: [String: Any] = ["matcher": "", "hooks": [hookDef]]
@@ -355,9 +447,56 @@ final class BridgeCoordinator {
             }
         }
 
-        settings["hooks"] = hooks
+        if hooks.isEmpty {
+            settings.removeValue(forKey: "hooks")
+        } else {
+            settings["hooks"] = hooks
+        }
         writeSettings(settings)
-        hooksInstalled = true
+    }
+
+    /// Called after hooks are installed to configure the bot and trigger macOS permissions.
+    func finalizeSetup() async {
+        isFinalizingSetup = true
+        defer { isFinalizingSetup = false }
+
+        guard let telegram else { return }
+
+        // 1. Set bot profile photo from bundled logo
+        if let logoURL = Bundle.main.url(forResource: "logo", withExtension: "png"),
+           let logoData = try? Data(contentsOf: logoURL) {
+            try? await telegram.setMyProfilePhoto(imageData: logoData)
+        }
+
+        // 2. Set bot commands and description
+        try? await telegram.setMyCommands([
+            TGBotCommand(command: "status", description: "Active sessions"),
+            TGBotCommand(command: "start", description: "Show help")
+        ])
+        try? await telegram.setMyDescription("Claudio — monitor and control Claude Code sessions.")
+
+        // 3. Trigger macOS Automation permission for Terminal.app
+        //    This prompts "Claudio wants to control Terminal.app" on first run.
+        let _ = await triggerAutomationPermission()
+
+        // 4. Prompt for Accessibility permission if not granted
+        if !AXIsProcessTrusted() {
+            let _ = AXIsProcessTrustedWithOptions(
+                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            )
+        }
+    }
+
+    /// Run a harmless Terminal.app AppleScript to trigger the Automation permission dialog.
+    private func triggerAutomationPermission() async -> Bool {
+        await MainActor.run {
+            var errorInfo: NSDictionary?
+            let script = NSAppleScript(source: """
+                tell application "Terminal" to return name
+                """)
+            let result = script?.executeAndReturnError(&errorInfo)
+            return result != nil && errorInfo == nil
+        }
     }
 
     /// Removes all Claudio hooks from ~/.claude/settings.json.
@@ -380,13 +519,13 @@ final class BridgeCoordinator {
         hooksInstalled = false
     }
 
-    /// Checks that ALL required hook events are installed (not just PermissionRequest).
+    /// Checks if any Claudio hooks exist in settings (indicates setup was completed).
     func checkHooksInstalled() -> Bool {
         let settings = readSettings()
         guard let hooks = settings["hooks"] as? [String: Any] else { return false }
 
-        return Self.hookEvents.allSatisfy { event, _, _ in
-            guard let entries = hooks[event] as? [[String: Any]] else { return false }
+        return hooks.values.contains { value in
+            guard let entries = value as? [[String: Any]] else { return false }
             return entries.contains(where: Self.isOurEntry)
         }
     }

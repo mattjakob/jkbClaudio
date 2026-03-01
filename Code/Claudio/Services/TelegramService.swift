@@ -131,6 +131,40 @@ actor TelegramService {
         let _: Bool = try await post("setMyDescription", body: body)
     }
 
+    /// Upload a static profile photo via multipart form data.
+    func setMyProfilePhoto(imageData: Data) async throws {
+        let url = URL(string: baseURL + "setMyProfilePhoto")!
+        let boundary = UUID().uuidString
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        func add(_ s: String) { body.append(contentsOf: s.utf8) }
+
+        // Part 1: photo JSON descriptor
+        add("--\(boundary)\r\n")
+        add("Content-Disposition: form-data; name=\"photo\"\r\n")
+        add("Content-Type: application/json\r\n\r\n")
+        add("{\"type\":\"static\",\"photo\":\"attach://file\"}\r\n")
+
+        // Part 2: actual image file
+        add("--\(boundary)\r\n")
+        add("Content-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\n")
+        add("Content-Type: image/png\r\n\r\n")
+        body.append(imageData)
+        add("\r\n--\(boundary)--\r\n")
+
+        request.httpBody = body
+
+        let (respData, _) = try await session.data(for: request)
+        let decoded = try decoder.decode(TGResponse<Bool>.self, from: respData)
+        guard decoded.ok else {
+            throw TelegramAPIError(code: 0, description: decoded.description ?? "setMyProfilePhoto failed")
+        }
+    }
+
     /// Send a message, returning true on success. Logs failures but does not throw.
     @discardableResult
     func send(_ text: String, replyMarkup: TGInlineKeyboardMarkup? = nil) async -> Bool {

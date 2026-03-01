@@ -178,12 +178,19 @@ enum StdinInjector {
 
         let typeResult = await runAppleScriptOnMain(typeScript)
 
-        // If Accessibility permission denied, open System Settings
+        // If Accessibility permission denied (error 1002)
         if case .failed(let msg) = typeResult, msg.contains("1002") {
-            _ = await MainActor.run {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            let alreadyListed = AXIsProcessTrusted()
+            // Prompt via native API (shows dialog if not trusted)
+            await MainActor.run {
+                let _ = AXIsProcessTrustedWithOptions(
+                    ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                )
             }
-            return .failed("Accessibility permission required. Add Claudio in the System Settings window that just opened, then try again.")
+            let hint = alreadyListed
+                ? "Accessibility entry is stale (app was rebuilt). Toggle Claudio off and on in System Settings > Accessibility, then retry."
+                : "Accessibility permission required. Grant it in the dialog or System Settings, then retry."
+            return .failed(hint)
         }
 
         return typeResult
