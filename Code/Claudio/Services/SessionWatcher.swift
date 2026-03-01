@@ -13,6 +13,7 @@ actor SessionWatcher {
     }
     private(set) var watchedPaths: Set<String> = []
     private var watchers: [String: WatchState] = [:]
+    private var lineBuffers: [String: Data] = [:]
 
     private struct WatchState {
         let source: DispatchSourceFileSystemObject
@@ -58,12 +59,14 @@ actor SessionWatcher {
 
         watchers[path] = WatchState(source: source, fileHandle: fileHandle, fd: fd)
         watchedPaths.insert(path)
+        lineBuffers[path] = Data()
         source.resume()
     }
 
     func unwatchFile(at path: String) {
         guard let state = watchers.removeValue(forKey: path) else { return }
         watchedPaths.remove(path)
+        lineBuffers.removeValue(forKey: path)
         state.source.cancel()
     }
 
@@ -74,25 +77,29 @@ actor SessionWatcher {
     }
 
     private func handleNewData(_ data: Data, for sessionPath: String) async {
+        // Append to per-file buffer
+        lineBuffers[sessionPath, default: Data()].append(data)
+
+        guard var buffer = lineBuffers[sessionPath] else { return }
+
         let newlineByte: UInt8 = 0x0A
-        var start = data.startIndex
+        var start = buffer.startIndex
 
-        for i in data.indices where data[i] == newlineByte {
-            let lineData = data[start..<i]
+        for i in buffer.indices where buffer[i] == newlineByte {
+            let lineData = buffer[start..<i]
             if !lineData.isEmpty {
                 let line = WatchedLine(sessionPath: sessionPath, jsonLine: Data(lineData))
                 await onNewLine?(line)
             }
-            start = data.index(after: i)
+            start = buffer.index(after: i)
         }
 
-        // Handle trailing data without a newline
-        if start < data.endIndex {
-            let lineData = data[start..<data.endIndex]
-            if !lineData.isEmpty {
-                let line = WatchedLine(sessionPath: sessionPath, jsonLine: Data(lineData))
-                await onNewLine?(line)
-            }
+        // Keep only the unconsumed remainder (partial line)
+        if start < buffer.endIndex {
+            buffer = Data(buffer[start...])
+        } else {
+            buffer = Data()
         }
+        lineBuffers[sessionPath] = buffer
     }
 }

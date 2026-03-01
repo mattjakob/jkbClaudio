@@ -22,6 +22,8 @@
     <string>AppIcon</string>
     <key>LSUIElement</key>
     <true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Claudio needs to control your terminal to send messages to Claude Code sessions.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Matt Jakob. All rights reserved.</string>
 </dict>

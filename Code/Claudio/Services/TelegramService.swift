@@ -27,16 +27,21 @@ actor TelegramService {
     func startPolling(handler: @escaping @Sendable (TGUpdate) async -> Void) {
         pollingTask?.cancel()
         pollingTask = Task {
+            var consecutiveErrors = 0
+
             while !Task.isCancelled {
                 do {
                     let updates = try await getUpdates(timeout: 30)
+                    consecutiveErrors = 0
                     for update in updates {
                         offset = update.updateId + 1
                         await handler(update)
                     }
                 } catch {
                     if Task.isCancelled { return }
-                    try? await Task.sleep(for: .seconds(5))
+                    consecutiveErrors += 1
+                    let delay = backoffDelay(attempt: consecutiveErrors)
+                    try? await Task.sleep(for: .seconds(delay))
                 }
             }
         }
@@ -45,6 +50,13 @@ actor TelegramService {
     func stopPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    /// Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped), with jitter.
+    private func backoffDelay(attempt: Int) -> Double {
+        let base = min(pow(2.0, Double(attempt - 1)), 30.0)
+        let jitter = Double.random(in: 0...1)
+        return base + jitter
     }
 
     // MARK: - API Methods
@@ -119,19 +131,29 @@ actor TelegramService {
         let _: Bool = try await post("setMyDescription", body: body)
     }
 
-    func send(_ text: String, replyMarkup: TGInlineKeyboardMarkup? = nil) async {
-        guard let chatId else { return }
+    /// Send a message, returning true on success. Logs failures but does not throw.
+    @discardableResult
+    func send(_ text: String, replyMarkup: TGInlineKeyboardMarkup? = nil) async -> Bool {
+        guard let chatId else { return false }
 
-        let truncated = text.count > 4000
-            ? String(text.prefix(4000))
-            : text
+        let truncated = text.count > 4000 ? String(text.prefix(4000)) : text
 
-        _ = try? await sendMessage(
-            chatId: chatId,
-            text: truncated,
-            parseMode: "HTML",
-            replyMarkup: replyMarkup
-        )
+        do {
+            _ = try await sendMessage(
+                chatId: chatId,
+                text: truncated,
+                parseMode: "HTML",
+                replyMarkup: replyMarkup
+            )
+            return true
+        } catch {
+            // Fall back to plain text if HTML parsing failed
+            if let data = (error as? TelegramAPIError)?.description,
+               data.contains("can't parse entities") {
+                _ = try? await sendMessage(chatId: chatId, text: truncated)
+            }
+            return false
+        }
     }
 
     // MARK: - Private
@@ -149,16 +171,25 @@ actor TelegramService {
 
         let (data, response) = try await session.data(for: request)
 
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
         }
 
         let decoded = try decoder.decode(TGResponse<R>.self, from: data)
 
         guard decoded.ok, let result = decoded.result else {
-            throw URLError(.badServerResponse)
+            throw TelegramAPIError(
+                code: http.statusCode,
+                description: decoded.description ?? "Unknown error"
+            )
         }
 
         return result
     }
+}
+
+/// Typed error for Telegram API failures
+struct TelegramAPIError: Error, Sendable {
+    let code: Int
+    let description: String
 }

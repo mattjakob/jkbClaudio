@@ -13,7 +13,6 @@ final class BridgeCoordinator {
     private var telegram: TelegramService?
     private let hookServer = HookServer()
     private let sessionWatcher = SessionWatcher()
-    private let remoteManager = RemoteSessionManager()
 
     private var sessionSlots: [SessionSlot] = []
     private var nextSlotNumber: Int = 1
@@ -24,6 +23,7 @@ final class BridgeCoordinator {
         let pid: Int
         let jsonlPath: String
         let cwd: String
+        let elapsedSeconds: Int
     }
 
     private static let tokenKey = "bridge_bot_token"
@@ -71,25 +71,14 @@ final class BridgeCoordinator {
             return
         }
 
-        // Auto-configure bot commands and description
+        // Bot commands — must be [a-z0-9_], pure digits may be rejected
         try? await telegram?.setMyCommands([
             TGBotCommand(command: "status", description: "Active sessions"),
-            TGBotCommand(command: "run", description: "Start a remote session"),
-            TGBotCommand(command: "stop", description: "Stop remote session"),
-            TGBotCommand(command: "start", description: "Show help"),
-            TGBotCommand(command: "1", description: "Send to session 1"),
-            TGBotCommand(command: "2", description: "Send to session 2"),
-            TGBotCommand(command: "3", description: "Send to session 3"),
-            TGBotCommand(command: "4", description: "Send to session 4")
+            TGBotCommand(command: "start", description: "Show help")
         ])
         try? await telegram?.setMyDescription("Claudio — monitor and control Claude Code sessions.")
 
-        do {
-            try await hookServer.start()
-        } catch {
-            lastBridgeError = "Hook server: \(error.localizedDescription)"
-        }
-
+        // Set handlers BEFORE starting servers to avoid race conditions
         await hookServer.setOnEvent { [weak self] event, permId in
             await self?.handleHookEvent(event, permissionId: permId)
         }
@@ -98,23 +87,26 @@ final class BridgeCoordinator {
             await self?.handleWatchedLine(line)
         }
 
-        await remoteManager.setOnOutput { [weak self] text in
-            await self?.handleRemoteOutput(text)
+        var hookStarted = true
+        do {
+            try await hookServer.start()
+        } catch {
+            hookStarted = false
+            lastBridgeError = "Hook server: \(error.localizedDescription)"
         }
 
         await telegram?.startPolling { [weak self] update in
             await self?.handleTelegramUpdate(update)
         }
 
-        isConnected = true
-        lastBridgeError = nil
+        isConnected = hookStarted
+        if hookStarted { lastBridgeError = nil }
     }
 
     func stop() async {
         await telegram?.stopPolling()
         await hookServer.stop()
         await sessionWatcher.unwatchAll()
-        await remoteManager.stop()
         isConnected = false
     }
 
@@ -139,14 +131,15 @@ final class BridgeCoordinator {
 
         // Update session slots — keep existing numbers, assign new ones, prune ended
         let activeProjectPaths = Set(sessions.map(\.projectPath))
+        let usedNumbers = Set<Int>()
         var keptSlots: [SessionSlot] = []
         for slot in sessionSlots {
             if activeProjectPaths.contains(slot.cwd) {
-                // Update with fresh PID/jsonlPath from current session data
                 if let session = sessions.first(where: { $0.projectPath == slot.cwd }) {
                     keptSlots.append(SessionSlot(
                         number: slot.number, name: session.projectName,
-                        pid: session.pid, jsonlPath: session.fullPath, cwd: session.projectPath
+                        pid: session.pid, jsonlPath: session.fullPath,
+                        cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds
                     ))
                 } else {
                     keptSlots.append(slot)
@@ -154,13 +147,21 @@ final class BridgeCoordinator {
             }
         }
         let keptCwds = Set(keptSlots.map(\.cwd))
+        let takenNumbers = usedNumbers.union(keptSlots.map(\.number))
         for session in sessions where !keptCwds.contains(session.projectPath) {
+            // Find next available slot number (skip already-taken)
+            var n = nextSlotNumber
+            var attempts = 0
+            while takenNumbers.contains(n) && attempts < 9 {
+                n = (n % 9) + 1
+                attempts += 1
+            }
             keptSlots.append(SessionSlot(
-                number: nextSlotNumber, name: session.projectName,
-                pid: session.pid, jsonlPath: session.fullPath, cwd: session.projectPath
+                number: n, name: session.projectName,
+                pid: session.pid, jsonlPath: session.fullPath,
+                cwd: session.projectPath, elapsedSeconds: session.elapsedSeconds
             ))
-            nextSlotNumber += 1
-            if nextSlotNumber > 9 { nextSlotNumber = 1 }
+            nextSlotNumber = (n % 9) + 1
         }
         sessionSlots = keptSlots
 
@@ -191,7 +192,11 @@ final class BridgeCoordinator {
 
         case "Notification":
             let type = event.notificationType ?? ""
+            let title = event.title
             let msg = event.message ?? ""
+            let body = [title, msg.isEmpty ? nil : msg]
+                .compactMap { $0 }
+                .joined(separator: "\n")
             let prefix: String
             switch type {
             case "idle_prompt": prefix = "\u{1F928} \(tag) — Waiting for input"
@@ -199,7 +204,7 @@ final class BridgeCoordinator {
             case "permission_prompt": prefix = "\u{1F512} \(tag) — Permission needed"
             default: prefix = "\u{1F514} \(tag) — Notification"
             }
-            await telegram.send("\(prefix)\n\(escapeHTML(msg))")
+            await telegram.send("\(prefix)\n\(escapeHTML(body))")
 
         case "Stop":
             await telegram.send("\u{23F8}\u{FE0F} \(tag) — Agent finished")
@@ -224,14 +229,12 @@ final class BridgeCoordinator {
 
         if type == "assistant", let msg = obj["message"] as? [String: Any],
            let content = msg["content"] as? [[String: Any]] {
-            // Only collect text blocks — skip tool_use noise
             let texts = content.compactMap { block -> String? in
                 guard block["type"] as? String == "text",
                       let text = block["text"] as? String,
                       !text.isEmpty else { return nil }
                 return text
             }
-            // Skip entirely if no text blocks (all tool_use)
             guard !texts.isEmpty else { return }
 
             let tag = slotTag(fromJsonlPath: line.sessionPath)
@@ -284,51 +287,23 @@ final class BridgeCoordinator {
             return
         }
 
-        if text.hasPrefix("/run ") {
-            let args = text.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            let parts = args.components(separatedBy: " ")
-            guard parts.count >= 2 else {
-                await telegram?.send("Usage: /run {project} {prompt}")
-                return
-            }
-            let project = parts[0]
-            let prompt = parts.dropFirst().joined(separator: " ")
-            guard let projectPath = resolveProjectPath(project) else {
-                await telegram?.send("Project not found: \(project)")
-                return
-            }
-            do {
-                try await remoteManager.start(projectPath: projectPath, prompt: prompt)
-                await telegram?.send("Started remote session: <b>\(project)</b>")
-            } catch {
-                await telegram?.send("Failed to start: \(escapeHTML(error.localizedDescription))")
-            }
-        } else if text == "/stop" {
-            await remoteManager.stop()
-            await telegram?.send("Remote session stopped")
-        } else if text == "/status" {
-            let remote = await remoteManager.hasActiveSession
+        if text == "/status" {
             var lines = ["<b>Claudio Bridge</b>\n"]
             if sessionSlots.isEmpty {
                 lines.append("No active sessions")
             } else {
                 for slot in sessionSlots {
-                    let elapsed = formatElapsed(slot)
+                    let elapsed = friendlyElapsed(slot.elapsedSeconds)
                     lines.append("\(slotEmoji(slot.number)) \(escapeHTML(slot.name)) · \(elapsed)")
                 }
             }
-            lines.append("\nRemote: \(remote ? "running" : "none")")
             await telegram?.send(lines.joined(separator: "\n"))
         } else if text == "/start" {
             await telegram?.send(
                 "Claudio bridge ready.\n\n" +
                 "/status — active sessions\n" +
-                "/1 /2 ... — send to session\n" +
-                "/run {project} {prompt} — remote session\n" +
-                "/stop — stop remote session"
+                "/1 msg, /2 msg ... — send to session"
             )
-        } else if await remoteManager.hasActiveSession {
-            await remoteManager.sendInput(text)
         }
     }
 
@@ -342,23 +317,6 @@ final class BridgeCoordinator {
             try? await telegram?.answerCallbackQuery(id: callback.id, text: allow ? "Approved" : "Denied")
             if let msg = callback.message {
                 try? await telegram?.editMessageReplyMarkup(chatId: msg.chat.id, messageId: msg.messageId)
-            }
-        }
-    }
-
-    // MARK: - Remote session output
-
-    private func handleRemoteOutput(_ text: String) async {
-        guard let telegram else { return }
-        for line in text.components(separatedBy: "\n") where !line.isEmpty {
-            if let data = line.data(using: .utf8),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let type = obj["type"] as? String
-                if type == "assistant", let content = obj["content"] as? String, !content.isEmpty {
-                    await telegram.send(escapeHTML(content))
-                } else if type == "result", let result = obj["result"] as? String {
-                    await telegram.send("<b>Result:</b>\n\(escapeHTML(result))")
-                }
             }
         }
     }
@@ -489,11 +447,13 @@ final class BridgeCoordinator {
         return "\(clamped)\u{FE0F}\u{20E3}"
     }
 
-    /// Build display tag like "1️⃣ jkbClaudio" from a cwd path (hook events)
+    /// Build display tag from a cwd path (hook events). Matches cwd first (exact), then name (ambiguous).
     private func slotTag(from cwd: String?) -> String {
         guard let cwd else { return "Unknown" }
         let name = URL(fileURLWithPath: cwd).lastPathComponent
-        if let slot = sessionSlots.first(where: { $0.name == name || $0.cwd == cwd }) {
+        // Prefer exact cwd match, fall back to name match
+        if let slot = sessionSlots.first(where: { $0.cwd == cwd })
+            ?? sessionSlots.first(where: { $0.name == name }) {
             return "<b>\(slotEmoji(slot.number)) \(escapeHTML(slot.name))</b>"
         }
         return "<b>\(escapeHTML(name))</b>"
@@ -523,43 +483,12 @@ final class BridgeCoordinator {
         return (n, message)
     }
 
-    private func formatElapsed(_ slot: SessionSlot) -> String {
-        // Find matching session's elapsedSeconds from slots (we don't store it)
-        // Use a simpler approach: look up from pid via ps
-        let pipe = Pipe()
-        let ps = Process()
-        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-p", String(slot.pid), "-o", "etime="]
-        ps.standardOutput = pipe
-        ps.standardError = FileHandle.nullDevice
-        do { try ps.run(); ps.waitUntilExit() } catch { return "?" }
-        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !output.isEmpty else { return "?" }
-        // Convert etime to friendly format
-        return friendlyElapsed(output)
-    }
-
-    /// Convert ps etime "01:23" / "1-02:03:04" to "1h 23m" style
-    private func friendlyElapsed(_ etime: String) -> String {
-        var total = 0
-        var str = etime
-        if let dash = str.firstIndex(of: "-") {
-            let days = Int(str[str.startIndex..<dash]) ?? 0
-            total += days * 86400
-            str = String(str[str.index(after: dash)...])
+    /// Format elapsed seconds to friendly string like "12m" or "1h 23m"
+    private func friendlyElapsed(_ seconds: Int) -> String {
+        if seconds >= 3600 {
+            return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
         }
-        let parts = str.components(separatedBy: ":").compactMap { Int($0) }
-        switch parts.count {
-        case 3: total += parts[0] * 3600 + parts[1] * 60 + parts[2]
-        case 2: total += parts[0] * 60 + parts[1]
-        case 1: total += parts[0]
-        default: break
-        }
-        if total >= 3600 {
-            return "\(total / 3600)h \((total % 3600) / 60)m"
-        }
-        return "\(total / 60)m"
+        return "\(max(seconds / 60, 1))m"
     }
 
     private func formatToolInput(_ input: [String: AnyCodable]?) -> String {

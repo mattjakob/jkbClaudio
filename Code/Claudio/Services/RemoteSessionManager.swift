@@ -5,9 +5,12 @@ actor RemoteSessionManager {
         let process: Process
         let stdin: FileHandle
         let projectPath: String
+        let generation: Int
     }
 
     private var session: RemoteSession?
+    private var generation: Int = 0
+    private var lineBuffer = Data()
 
     private(set) var onOutput: (@Sendable (String) async -> Void)?
 
@@ -28,6 +31,10 @@ actor RemoteSessionManager {
             ])
         }
 
+        generation += 1
+        let currentGen = generation
+        lineBuffer = Data()
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: claudePath)
         process.arguments = ["-p", prompt, "--output-format", "stream-json"]
@@ -35,6 +42,7 @@ actor RemoteSessionManager {
 
         var env = Foundation.ProcessInfo.processInfo.environment
         env["TERM"] = "dumb"
+        env.removeValue(forKey: "CLAUDECODE")
         process.environment = env
 
         let stdinPipe = Pipe()
@@ -45,16 +53,15 @@ actor RemoteSessionManager {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        let callback = onOutput
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            Task { await callback?(text) }
+            guard !data.isEmpty else { return }
+            Task { await self?.handleChunk(data) }
         }
 
         process.terminationHandler = { [weak self] _ in
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
-            Task { await self?.clearSession() }
+            Task { await self?.clearSession(generation: currentGen) }
         }
 
         try process.run()
@@ -62,8 +69,32 @@ actor RemoteSessionManager {
         session = RemoteSession(
             process: process,
             stdin: stdinPipe.fileHandleForWriting,
-            projectPath: projectPath
+            projectPath: projectPath,
+            generation: currentGen
         )
+    }
+
+    /// Buffer incoming chunks and emit complete lines to the output handler.
+    private func handleChunk(_ data: Data) async {
+        lineBuffer.append(data)
+
+        let newline: UInt8 = 0x0A
+        var start = lineBuffer.startIndex
+
+        for i in lineBuffer.indices where lineBuffer[i] == newline {
+            let lineData = lineBuffer[start..<i]
+            if !lineData.isEmpty, let text = String(data: Data(lineData), encoding: .utf8) {
+                await onOutput?(text)
+            }
+            start = lineBuffer.index(after: i)
+        }
+
+        // Keep unconsumed remainder
+        if start < lineBuffer.endIndex {
+            lineBuffer = Data(lineBuffer[start...])
+        } else {
+            lineBuffer = Data()
+        }
     }
 
     func sendInput(_ text: String) {
@@ -75,18 +106,31 @@ actor RemoteSessionManager {
     func stop() async {
         guard let session else { return }
         session.process.terminate()
-        session.process.waitUntilExit()
+        await withCheckedContinuation { continuation in
+            if !session.process.isRunning {
+                continuation.resume()
+                return
+            }
+            session.process.terminationHandler = { _ in
+                continuation.resume()
+            }
+        }
         self.session = nil
+        lineBuffer = Data()
     }
 
-    private func clearSession() {
+    /// Only clears session if generation matches — prevents stale handlers from killing new sessions.
+    private func clearSession(generation gen: Int) {
+        guard session?.generation == gen else { return }
         session = nil
     }
 
     private nonisolated func findClaude() -> String? {
+        let home = NSHomeDirectory()
         let candidates = [
+            home + "/.local/bin/claude",
             "/usr/local/bin/claude",
-            NSHomeDirectory() + "/.claude/local/claude",
+            home + "/.claude/local/claude",
             "/opt/homebrew/bin/claude"
         ]
 

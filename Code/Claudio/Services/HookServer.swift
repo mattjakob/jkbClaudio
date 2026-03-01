@@ -83,17 +83,23 @@ actor HookServer {
     }
 
     /// Checks whether the accumulated buffer contains a complete HTTP request.
+    /// Uses byte-level search to avoid UTF-8 decode issues with binary payloads.
     private nonisolated static func isRequestComplete(_ data: Data) -> Bool {
-        guard let raw = String(data: data, encoding: .utf8),
-              let headerEnd = raw.range(of: "\r\n\r\n") else {
+        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A] // \r\n\r\n
+        guard let separatorRange = data.firstRange(of: separator) else {
             return false
         }
 
-        let headers = raw[..<headerEnd.lowerBound].lowercased()
-        let bodyBytes = raw[headerEnd.upperBound...].utf8.count
+        let headerData = data[data.startIndex..<separatorRange.lowerBound]
+        let bodyStart = separatorRange.upperBound
+        let bodyBytes = data.endIndex - bodyStart
 
         // Parse Content-Length from headers
-        for line in headers.split(separator: "\r\n") {
+        guard let headerString = String(data: headerData, encoding: .utf8)?.lowercased() else {
+            return false
+        }
+
+        for line in headerString.split(separator: "\r\n") {
             if line.hasPrefix("content-length:") {
                 let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
                 if let cl = Int(value) {
