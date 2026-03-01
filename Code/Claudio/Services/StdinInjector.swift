@@ -188,9 +188,9 @@ enum StdinInjector {
             tell application "System Events"
                 tell process "Terminal"
                     keystroke "u" using control down
-                    delay 0.05
+                    delay 0.15
                     keystroke "\(escaped(text))"
-                    delay 0.05
+                    delay 0.1
                     key code 36
                 end tell
             end tell

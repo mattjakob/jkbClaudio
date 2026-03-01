@@ -419,13 +419,7 @@ final class BridgeCoordinator {
                 await telegram?.send("Session \(slotNum) has no active process")
                 return
             }
-            let result = await StdinInjector.inject(text: message, forPid: String(slot.pid))
-            switch result {
-            case .success:
-                await telegram?.send("Sent to \(slotLabel(slot.number)) | \(escapeHTML(slot.name))")
-            case .failed(let err):
-                await telegram?.send("Failed: \(escapeHTML(err))")
-            }
+            await injectToSlot(slot, message: message)
             return
         }
 
