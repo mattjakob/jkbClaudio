@@ -162,7 +162,7 @@ final class BridgeCoordinator {
 
         // Bot commands — must be [a-z0-9_], pure digits may be rejected
         try? await telegram?.setMyCommands([
-            TGBotCommand(command: "status", description: "Active sessions"),
+            TGBotCommand(command: "status", description: "System status"),
             TGBotCommand(command: "start", description: "Show help")
         ])
         try? await telegram?.setMyDescription("Claudio — monitor and control Claude Code sessions.")
@@ -303,7 +303,7 @@ final class BridgeCoordinator {
             let tag = slotTag(from: event.cwd, emoji: "\u{26A1}\u{FE0F}")
             let tool = event.toolName ?? "Unknown"
             let input = formatToolInput(event.toolInput)
-            let text = "\(tag)\nTool: <code>\(tool)</code>\n\(input)"
+            let text = "\(tag)\n<pre>Tool: \(escapeHTML(tool))\n\(input)</pre>"
             let keyboard = TGInlineKeyboardMarkup(inlineKeyboard: [[
                 TGInlineKeyboardButton(text: "Approve", callbackData: "perm_allow_\(permissionId)"),
                 TGInlineKeyboardButton(text: "Deny", callbackData: "perm_deny_\(permissionId)")
@@ -336,7 +336,7 @@ final class BridgeCoordinator {
             let body = [title, msg.isEmpty ? nil : msg]
                 .compactMap { $0 }
                 .joined(separator: "\n")
-            await telegram.send("\(tag)\n\(escapeHTML(body))")
+            await telegram.send("\(tag)\n<pre>\(escapeHTML(body))</pre>")
 
         case "Stop":
             let tag = slotTag(from: event.cwd, emoji: "\u{1FAD6}")
@@ -382,7 +382,7 @@ final class BridgeCoordinator {
             }
             let combined = texts.joined(separator: "\n")
             let truncated = combined.count > 1500 ? String(combined.prefix(1500)) + "..." : combined
-            await telegram.send("\(name)\n\(escapeHTML(truncated))")
+            await telegram.send("\(name)\n<pre>\(escapeHTML(truncated))</pre>")
         }
     }
 
@@ -430,12 +430,11 @@ final class BridgeCoordinator {
         }
 
         if text == "/status" {
-            var lines = ["\u{2728} <b>STATUS</b> \u{2728}\n"]
+            let header = "\u{2728} <b>STATUS</b> \u{2728}"
             if sessionSlots.isEmpty {
-                lines.append("No active sessions")
+                await telegram?.send("\(header)\n\nNo active sessions")
             } else {
                 let maxName = 10
-                // Build column data to compute widths
                 struct Row {
                     let label: String; let name: String; let agents: String; let state: String
                 }
@@ -453,21 +452,22 @@ final class BridgeCoordinator {
                 }
                 let nameW = rows.map(\.name.count).max() ?? 0
                 let agentW = rows.map(\.agents.count).max() ?? 0
+                var body: [String] = []
                 for row in rows {
                     let n = row.name.padding(toLength: nameW, withPad: " ", startingAt: 0)
                     let a = row.agents.padding(toLength: agentW, withPad: " ", startingAt: 0)
-                    lines.append("\(row.label) \(escapeHTML(n)) | \(a) | \(row.state)")
+                    body.append("\(row.label) \(escapeHTML(n)) | \(a) | \(row.state)")
                 }
-                lines.append("\nUse /1 [message] to send a message directly to an agent")
+                body.append("\nUse /[N] [MESSAGE] to send a message directly to an agent")
+                await telegram?.send("\(header)\n<pre>\(body.joined(separator: "\n"))</pre>")
             }
-            await telegram?.send(lines.joined(separator: "\n"))
         } else if text == "/start" {
             await telegram?.send(
                 "\u{1F3C0}\u{1F94E}\u{26BD}\u{FE0F} <b>CLAUDIO</b> \u{26BD}\u{FE0F}\u{1F94E}\u{1F3C0}\n\n" +
-                "Commands:\n" +
+                "<pre>Commands:\n" +
                 "/status        active sessions\n" +
                 "/[N] [MESSAGE] sends to agent\n" +
-                "[MESSAGE]      interactive"
+                "[MESSAGE]      interactive</pre>"
             )
         } else if !text.hasPrefix("/") {
             // Bare message — route to last active session or prompt
@@ -608,7 +608,7 @@ final class BridgeCoordinator {
 
         // 2. Set bot commands and description
         try? await telegram.setMyCommands([
-            TGBotCommand(command: "status", description: "Active sessions"),
+            TGBotCommand(command: "status", description: "System status"),
             TGBotCommand(command: "start", description: "Show help")
         ])
         try? await telegram.setMyDescription("Claudio — monitor and control Claude Code sessions.")
@@ -770,10 +770,10 @@ final class BridgeCoordinator {
     private func formatToolInput(_ input: [String: AnyCodable]?) -> String {
         guard let input else { return "" }
         if case .string(let cmd) = input["command"] {
-            return "Command: <code>\(escapeHTML(String(cmd.prefix(200))))</code>"
+            return "Command: \(escapeHTML(String(cmd.prefix(200))))"
         }
         if case .string(let path) = input["file_path"] {
-            return "File: <code>\(escapeHTML(path))</code>"
+            return "File: \(escapeHTML(path))"
         }
         return ""
     }
