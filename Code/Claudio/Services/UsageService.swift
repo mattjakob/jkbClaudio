@@ -7,10 +7,10 @@ actor UsageService {
 
     func fetchUsage() async throws -> UsageResponse {
         let token = try KeychainService.shared.getAccessToken()
-        return try await request(with: token)
+        return try await request(with: token, retryCount: 0)
     }
 
-    private func request(with token: String) async throws -> UsageResponse {
+    private func request(with token: String, retryCount: Int) async throws -> UsageResponse {
         var request = URLRequest(url: apiURL)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
@@ -23,8 +23,9 @@ actor UsageService {
         }
 
         if http.statusCode == 401 {
+            guard retryCount < 1 else { throw URLError(.userAuthenticationRequired) }
             let newToken = try await refreshAccessToken()
-            return try await self.request(with: newToken)
+            return try await self.request(with: newToken, retryCount: retryCount + 1)
         }
 
         guard http.statusCode == 200 else {

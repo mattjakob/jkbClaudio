@@ -36,9 +36,6 @@ struct PopoverView: View {
                 proxy.scrollTo(true, anchor: .top)
             }
         }
-        .task {
-            await viewModel.refresh()
-        }
     }
 
     private var chartSection: some View {

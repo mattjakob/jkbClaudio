@@ -52,6 +52,10 @@ actor OTelReceiver {
                 Task { await self?.removeConnection(connection) }
             } else if data != nil {
                 self?.readLoop(connection)
+            } else {
+                // Error with no data and not complete — clean up
+                connection.cancel()
+                Task { await self?.removeConnection(connection) }
             }
         }
     }

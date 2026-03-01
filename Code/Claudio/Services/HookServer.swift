@@ -134,10 +134,13 @@ actor HookServer {
             let permissionId = "perm_\(nextPermissionId)"
             nextPermissionId += 1
 
-            await onEvent?(event, permissionId)
-
             let response: HookPermissionResponse = await withCheckedContinuation { continuation in
                 pendingPermissions[permissionId] = continuation
+
+                Task { [weak self] in
+                    // Notify handler (sends Telegram message) after continuation is registered
+                    await self?.onEvent?(event, permissionId)
+                }
 
                 Task { [weak self] in
                     try? await Task.sleep(for: .seconds(110))

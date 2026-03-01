@@ -46,9 +46,7 @@ actor SessionWatcher {
                 return
             }
             if events.contains(.extend) || events.contains(.write) {
-                let data = fileHandle.availableData
-                guard !data.isEmpty else { return }
-                Task { await self.handleNewData(data, for: sessionPath) }
+                Task { await self.readAndHandle(fileHandle: fileHandle, for: sessionPath) }
             }
         }
 
@@ -74,6 +72,14 @@ actor SessionWatcher {
         for path in Array(watchers.keys) {
             unwatchFile(at: path)
         }
+    }
+
+    /// Read from file handle on the actor to avoid concurrent access with cancel handler.
+    private func readAndHandle(fileHandle: FileHandle, for sessionPath: String) async {
+        guard watchers[sessionPath] != nil else { return }
+        let data = fileHandle.availableData
+        guard !data.isEmpty else { return }
+        await handleNewData(data, for: sessionPath)
     }
 
     private func handleNewData(_ data: Data, for sessionPath: String) async {

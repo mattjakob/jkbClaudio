@@ -246,7 +246,6 @@ final class BridgeCoordinator {
 
         // Update session slots — keep existing numbers, assign new ones, prune ended
         let activeProjectPaths = Set(sessions.map(\.projectPath))
-        let usedNumbers = Set<Int>()
         var keptSlots: [SessionSlot] = []
         for slot in sessionSlots {
             if activeProjectPaths.contains(slot.cwd) {
@@ -265,7 +264,7 @@ final class BridgeCoordinator {
             }
         }
         let keptCwds = Set(keptSlots.map(\.cwd))
-        let takenNumbers = usedNumbers.union(keptSlots.map(\.number))
+        let takenNumbers = Set(keptSlots.map(\.number))
         for session in sessions where !keptCwds.contains(session.projectPath) {
             // Find next available slot number (skip already-taken)
             var n = nextSlotNumber
@@ -510,7 +509,7 @@ final class BridgeCoordinator {
 
         if data.hasPrefix("perm_allow_") || data.hasPrefix("perm_deny_") {
             let allow = data.hasPrefix("perm_allow_")
-            let permId = String(data.dropFirst(allow ? 11 : 9))
+            let permId = String(data.dropFirst(allow ? 11 : 10))
             await hookServer.resolvePermission(id: permId, allow: allow)
             try? await telegram?.answerCallbackQuery(id: callback.id, text: allow ? "Approved" : "Denied")
             if let msg = callback.message {

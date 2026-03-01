@@ -144,6 +144,16 @@ enum StdinInjector {
     /// Find tab by TTY, focus it, type text + Enter via System Events keystroke.
     /// Requires Accessibility permission — opens System Settings on first denial.
     private static func terminalAppInject(text: String, ttyPath: String) async -> InjectionResult {
+        // Pre-check: keystroke silently fails without Accessibility
+        guard AXIsProcessTrusted() else {
+            await MainActor.run {
+                let _ = AXIsProcessTrustedWithOptions(
+                    ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+                )
+            }
+            return .failed("Accessibility permission required. Grant it in System Settings > Privacy & Security > Accessibility, then retry.")
+        }
+
         let focusScript = """
             tell application "Terminal"
                 repeat with w in windows
