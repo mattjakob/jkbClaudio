@@ -149,7 +149,8 @@ echo "==> Creating GitHub release v$VERSION..."
 TAG="v$VERSION"
 git tag "$TAG"
 git push origin "$TAG"
-gh release create "$TAG" "$DMG_DIR/$DMG_NAME" \
+# Unset GITHUB_TOKEN so gh uses keyring token (fine-grained PAT lacks release scope)
+GITHUB_TOKEN= gh release create "$TAG" "$DMG_DIR/$DMG_NAME" \
     --title "$APP_NAME $TAG" \
     --notes "Release $TAG" \
     --latest
