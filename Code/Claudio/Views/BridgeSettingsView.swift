@@ -227,8 +227,9 @@ struct BridgeSettingsView: View {
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
-                        Button("Grant Access") {
+                        Button("Open Settings") {
                             bridge.promptAccessibility()
+                            NotificationService.openAccessibilitySettings()
                         }
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.blue)

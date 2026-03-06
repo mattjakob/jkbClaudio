@@ -30,6 +30,8 @@ final class AppViewModel {
     var extraUsageLimitDollars: Double = 0
     private var pollTimer: Timer?
     private var activity: NSObjectProtocol?
+    private var lastNotifiedWeeklyThreshold: Int = 0
+    private var lastNotifiedFiveHourThreshold: Int = 0
 
     var menuBarText: String {
         if !isConnected { return "" }
@@ -37,14 +39,14 @@ final class AppViewModel {
     }
 
     var menuBarColor: Color {
-        if fiveHourUtilization >= 80 { return .widgetRed }
-        if fiveHourUtilization >= 60 { return .widgetYellow }
+        if fiveHourUtilization >= 70 { return .widgetRed }
+        if fiveHourUtilization >= 40 { return .widgetYellow }
         return .white
     }
 
     var menuBarIcon: String {
-        if fiveHourUtilization >= 80 { return "flame.fill" }
-        if fiveHourUtilization >= 60 { return "dog.fill" }
+        if fiveHourUtilization >= 70 { return "flame.fill" }
+        if fiveHourUtilization >= 40 { return "dog.fill" }
         return "leaf.fill"
     }
 
@@ -62,7 +64,7 @@ final class AppViewModel {
             await refresh()
         }
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in await self.refresh() }
         }
@@ -112,8 +114,12 @@ final class AppViewModel {
             isConnected = true
             lastError = nil
 
+            checkUsageMilestones()
+
             await historyService.record(weekly: weeklyUtilization, fiveHour: fiveHourUtilization)
             usageHistory = await historyService.getReadings()
+        } catch UsageError.rateLimited {
+            // 429 — keep previous data, no error shown
         } catch {
             isConnected = false
             lastError = error.localizedDescription
@@ -121,5 +127,29 @@ final class AppViewModel {
 
         activeSessions = await sessionService.getActiveSessions()
         await bridge.updateWatchedSessions(activeSessions)
+    }
+
+    private func checkUsageMilestones() {
+        // Weekly: notify at every 10% threshold (10, 20, 30, ...)
+        let weeklyThreshold = Int(weeklyUtilization / 10) * 10
+        if weeklyThreshold < lastNotifiedWeeklyThreshold {
+            lastNotifiedWeeklyThreshold = weeklyThreshold
+        } else if weeklyThreshold > lastNotifiedWeeklyThreshold && weeklyThreshold >= 10 {
+            lastNotifiedWeeklyThreshold = weeklyThreshold
+            NotificationService.shared.sendUsageMilestone(label: "Weekly", percentage: weeklyThreshold)
+        }
+
+        // 5-hour: notify at 80% and 90%
+        let fiveHourThreshold: Int
+        if fiveHourUtilization >= 90 { fiveHourThreshold = 90 }
+        else if fiveHourUtilization >= 80 { fiveHourThreshold = 80 }
+        else { fiveHourThreshold = 0 }
+
+        if fiveHourThreshold < lastNotifiedFiveHourThreshold {
+            lastNotifiedFiveHourThreshold = fiveHourThreshold
+        } else if fiveHourThreshold > lastNotifiedFiveHourThreshold {
+            lastNotifiedFiveHourThreshold = fiveHourThreshold
+            NotificationService.shared.sendUsageMilestone(label: "5-Hour", percentage: fiveHourThreshold)
+        }
     }
 }

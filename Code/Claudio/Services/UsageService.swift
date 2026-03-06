@@ -1,5 +1,19 @@
 import Foundation
 
+enum UsageError: Error, LocalizedError {
+    case rateLimited
+    case serverError(Int)
+    case authExpired
+
+    var errorDescription: String? {
+        switch self {
+        case .rateLimited: nil
+        case .serverError(let code): "Usage API returned \(code)"
+        case .authExpired: "Session expired — relaunch Claude Code to re-authenticate"
+        }
+    }
+}
+
 actor UsageService {
     private let apiURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     private let refreshURL = URL(string: "https://console.anthropic.com/api/oauth/token")!
@@ -19,17 +33,21 @@ actor UsageService {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
+            throw UsageError.serverError(0)
         }
 
         if http.statusCode == 401 {
-            guard retryCount < 1 else { throw URLError(.userAuthenticationRequired) }
+            guard retryCount < 1 else { throw UsageError.authExpired }
             let newToken = try await refreshAccessToken()
             return try await self.request(with: newToken, retryCount: retryCount + 1)
         }
 
+        if http.statusCode == 429 {
+            throw UsageError.rateLimited
+        }
+
         guard http.statusCode == 200 else {
-            throw URLError(.badServerResponse)
+            throw UsageError.serverError(http.statusCode)
         }
 
         return try JSONDecoder().decode(UsageResponse.self, from: data)
@@ -52,11 +70,11 @@ actor UsageService {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            // Refresh token is stale — try reloading fresh credentials from Keychain
-            if let fresh = try? KeychainService.shared.reloadFromKeychain() {
+            // Refresh token is stale — try silent keychain read (no prompt)
+            if let fresh = KeychainService.shared.reloadFromKeychainSilently() {
                 return fresh.claudeAiOauth.accessToken
             }
-            throw URLError(.userAuthenticationRequired)
+            throw UsageError.authExpired
         }
 
         struct RefreshResponse: Codable {

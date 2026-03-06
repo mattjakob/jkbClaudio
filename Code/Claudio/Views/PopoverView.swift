@@ -16,27 +16,35 @@ struct PopoverView: View {
     }
 
     private var mainView: some View {
-        ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 12) {
-                    if !viewModel.isConnected, let error = viewModel.lastError {
-                        errorSection(error)
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 12) {
+                        if !viewModel.isConnected, let error = viewModel.lastError {
+                            errorSection(error)
+                        }
+                        chartSection
+                        if viewModel.extraUsageEnabled {
+                            extraUsageSection
+                        }
+                        sessionsSection
                     }
-                    chartSection
-                    if viewModel.extraUsageEnabled {
-                        extraUsageSection
+                    .padding(16)
+                    .id(true)
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active {
+                        proxy.scrollTo(true, anchor: .top)
                     }
-                    sessionsSection
-                    footerSection
-                }
-                .padding(16)
-                .id(true)
-            }
-            .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
-                    proxy.scrollTo(true, anchor: .top)
                 }
             }
+
+            Spacer(minLength: 0)
+
+            footerSection
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+                .padding(.top, 12)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

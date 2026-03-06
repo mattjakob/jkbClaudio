@@ -229,7 +229,7 @@ final class BridgeCoordinator {
         accessibilityGranted = AXIsProcessTrusted()
     }
 
-    /// Prompts the user to grant Accessibility permission, resetting stale TCC entries first.
+    /// Prompts the user to grant Accessibility permission via notification.
     func promptAccessibility() {
         // Reset stale entry (signature changed after rebuild)
         if !AXIsProcessTrusted(), let bundleId = Bundle.main.bundleIdentifier {
@@ -242,13 +242,11 @@ final class BridgeCoordinator {
             reset.waitUntilExit()
         }
 
-        let _ = AXIsProcessTrustedWithOptions(
-            ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        )
+        NotificationService.shared.sendAccessibilityRequired()
         checkAccessibility()
     }
 
-    /// If Accessibility isn't trusted, reset any stale TCC entry and prompt the user.
+    /// If Accessibility isn't trusted, send a notification instead of showing a dialog.
     private func ensureAccessibility() {
         guard !AXIsProcessTrusted() else {
             accessibilityGranted = true
@@ -1109,11 +1107,9 @@ final class BridgeCoordinator {
         //    This prompts "Claudio wants to control Terminal.app" on first run.
         let _ = await triggerAutomationPermission()
 
-        // 4. Prompt for Accessibility permission if not granted
+        // 4. Notify if Accessibility permission not granted
         if !AXIsProcessTrusted() {
-            let _ = AXIsProcessTrustedWithOptions(
-                ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            )
+            NotificationService.shared.sendAccessibilityRequired()
         }
     }
 

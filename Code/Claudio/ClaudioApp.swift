@@ -15,7 +15,10 @@ struct ClaudioApp: App {
                 icon: viewModel.menuBarIcon,
                 color: viewModel.menuBarColor
             )
-            .task { viewModel.startPolling() }
+            .task {
+                    NotificationService.shared.setup()
+                    viewModel.startPolling()
+                }
         }
         .menuBarExtraStyle(.window)
     }

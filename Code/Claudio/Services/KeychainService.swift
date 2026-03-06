@@ -62,33 +62,8 @@ final class KeychainService: Sendable {
         }
 
         // Fall back to Claude Code's Keychain item (prompts once)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.sourceService,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess else {
-            throw KeychainError.itemNotFound
-        }
-
-        guard let data = result as? Data else {
-            throw KeychainError.unexpectedData
-        }
-
-        do {
-            let creds = try JSONDecoder().decode(OAuthCredentials.self, from: data)
-            // Save to file mirror for future prompt-free reads
-            saveMirror(data)
-            cache.set(creds)
-            return creds
-        } catch {
-            throw KeychainError.decodingFailed(error)
-        }
+        let creds = try readKeychain(silent: false)
+        return creds
     }
 
     func updateMirror(with data: Data) {
@@ -106,7 +81,18 @@ final class KeychainService: Sendable {
         try getCredentials().claudeAiOauth.refreshToken
     }
 
-    /// Clears cached/mirror credentials and re-reads from the Keychain.
+    /// Silently re-reads from the Keychain without prompting.
+    /// Returns fresh credentials if accessible, nil if the keychain would prompt.
+    func reloadFromKeychainSilently() -> OAuthCredentials? {
+        cache.clear()
+        guard let creds = try? readKeychain(silent: true) else { return nil }
+        if let encoded = try? JSONEncoder().encode(creds) {
+            saveMirror(encoded)
+        }
+        return creds
+    }
+
+    /// Clears cached/mirror credentials and re-reads from the Keychain (may prompt).
     func reloadFromKeychain() throws -> OAuthCredentials {
         cache.clear()
         try? FileManager.default.removeItem(atPath: Self.mirrorPath)
@@ -114,6 +100,39 @@ final class KeychainService: Sendable {
     }
 
     // MARK: - Private
+
+    private func readKeychain(silent: Bool) throws -> OAuthCredentials {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.sourceService,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        if silent {
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        }
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        guard status == errSecSuccess else {
+            throw KeychainError.itemNotFound
+        }
+
+        guard let data = result as? Data else {
+            throw KeychainError.unexpectedData
+        }
+
+        do {
+            let creds = try JSONDecoder().decode(OAuthCredentials.self, from: data)
+            saveMirror(data)
+            cache.set(creds)
+            return creds
+        } catch {
+            throw KeychainError.decodingFailed(error)
+        }
+    }
 
     private func saveMirror(_ data: Data) {
         FileManager.default.createFile(atPath: Self.mirrorPath, contents: data)

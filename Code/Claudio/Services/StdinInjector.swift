@@ -156,11 +156,9 @@ enum StdinInjector {
         // Pre-check: keystroke silently fails without Accessibility
         guard AXIsProcessTrusted() else {
             await MainActor.run {
-                let _ = AXIsProcessTrustedWithOptions(
-                    ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-                )
+                NotificationService.shared.sendAccessibilityRequired()
             }
-            return .failed("Accessibility permission required. Grant it in System Settings > Privacy & Security > Accessibility, then retry.")
+            return .failed("Accessibility permission required. Tap the notification or open System Settings > Accessibility.")
         }
 
         let focusScript = """
@@ -202,15 +200,12 @@ enum StdinInjector {
         // If Accessibility permission denied (error 1002)
         if case .failed(let msg) = typeResult, msg.contains("1002") {
             let alreadyListed = AXIsProcessTrusted()
-            // Prompt via native API (shows dialog if not trusted)
             await MainActor.run {
-                let _ = AXIsProcessTrustedWithOptions(
-                    ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-                )
+                NotificationService.shared.sendAccessibilityRequired()
             }
             let hint = alreadyListed
                 ? "Accessibility entry is stale (app was rebuilt). Toggle Claudio off and on in System Settings > Accessibility, then retry."
-                : "Accessibility permission required. Grant it in the dialog or System Settings, then retry."
+                : "Accessibility permission required. Tap the notification or open System Settings > Accessibility."
             return .failed(hint)
         }
 
