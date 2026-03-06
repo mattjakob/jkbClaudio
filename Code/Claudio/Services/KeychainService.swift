@@ -82,13 +82,33 @@ final class KeychainService: Sendable {
     }
 
     /// Silently re-reads from the Keychain without prompting.
-    /// Returns fresh credentials if accessible, nil if the keychain would prompt.
+    /// Tries SecItemCopyMatching first, falls back to `security` CLI tool
+    /// (which bypasses per-app ACL — works after debug rebuilds).
     func reloadFromKeychainSilently() -> OAuthCredentials? {
         cache.clear()
-        guard let creds = try? readKeychain(silent: true) else { return nil }
-        if let encoded = try? JSONEncoder().encode(creds) {
-            saveMirror(encoded)
+        if let creds = try? readKeychain(silent: true) {
+            if let encoded = try? JSONEncoder().encode(creds) {
+                saveMirror(encoded)
+            }
+            return creds
         }
+        return reloadViaSecurityTool()
+    }
+
+    /// Reads the keychain via `/usr/bin/security` CLI, bypassing code-signature ACL checks.
+    private func reloadViaSecurityTool() -> OAuthCredentials? {
+        let pipe = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", Self.sourceService, "-w"]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run(); process.waitUntilExit() } catch { return nil }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let creds = try? JSONDecoder().decode(OAuthCredentials.self, from: data) else { return nil }
+        saveMirror(data)
+        cache.set(creds)
         return creds
     }
 

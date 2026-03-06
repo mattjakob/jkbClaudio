@@ -19,7 +19,14 @@ actor UsageService {
     private let refreshURL = URL(string: "https://console.anthropic.com/api/oauth/token")!
     private let clientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+    private var hassynced = false
+
     func fetchUsage() async throws -> UsageResponse {
+        // Sync from keychain on first call to pick up tokens refreshed by Claude Code
+        if !hassynced {
+            hassynced = true
+            let _ = KeychainService.shared.reloadFromKeychainSilently()
+        }
         let token = try KeychainService.shared.getAccessToken()
         return try await request(with: token, retryCount: 0)
     }
@@ -43,6 +50,12 @@ actor UsageService {
         }
 
         if http.statusCode == 429 {
+            // On first 429, try keychain — stale token may be rate-limited per-token
+            if retryCount == 0,
+               let fresh = KeychainService.shared.reloadFromKeychainSilently(),
+               fresh.claudeAiOauth.accessToken != token {
+                return try await self.request(with: fresh.claudeAiOauth.accessToken, retryCount: retryCount + 1)
+            }
             throw UsageError.rateLimited
         }
 
