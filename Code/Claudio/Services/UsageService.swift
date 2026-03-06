@@ -37,8 +37,8 @@ actor UsageService {
         }
 
         if http.statusCode == 401 {
-            guard retryCount < 1 else { throw UsageError.authExpired }
-            let newToken = try await refreshAccessToken()
+            guard retryCount < 2 else { throw UsageError.authExpired }
+            let newToken = try await resolveAuth(staleToken: token)
             return try await self.request(with: newToken, retryCount: retryCount + 1)
         }
 
@@ -53,9 +53,41 @@ actor UsageService {
         return try JSONDecoder().decode(UsageResponse.self, from: data)
     }
 
+    /// Resolves a fresh access token: keychain reload first, then OAuth refresh.
+    private func resolveAuth(staleToken: String) async throws -> String {
+        // 1. Re-read from keychain — Claude Code may have refreshed
+        if let fresh = KeychainService.shared.reloadFromKeychainSilently(),
+           fresh.claudeAiOauth.accessToken != staleToken {
+            return fresh.claudeAiOauth.accessToken
+        }
+
+        // 2. Try OAuth token refresh
+        return try await refreshAccessToken()
+    }
+
     private func refreshAccessToken() async throws -> String {
         let refreshToken = try KeychainService.shared.getRefreshToken()
 
+        // Try refreshing with current token
+        if let token = try? await doRefresh(with: refreshToken) {
+            return token
+        }
+
+        // Current refresh token failed — try keychain's if different
+        if let fresh = KeychainService.shared.reloadFromKeychainSilently() {
+            let keychainRefresh = fresh.claudeAiOauth.refreshToken
+            if keychainRefresh != refreshToken,
+               let token = try? await doRefresh(with: keychainRefresh) {
+                return token
+            }
+            // Return keychain's access token as last resort
+            return fresh.claudeAiOauth.accessToken
+        }
+
+        throw UsageError.authExpired
+    }
+
+    private func doRefresh(with refreshToken: String) async throws -> String {
         var request = URLRequest(url: refreshURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -70,10 +102,6 @@ actor UsageService {
         let (data, response) = try await URLSession.shared.data(for: request)
 
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            // Refresh token is stale — try silent keychain read (no prompt)
-            if let fresh = KeychainService.shared.reloadFromKeychainSilently() {
-                return fresh.claudeAiOauth.accessToken
-            }
             throw UsageError.authExpired
         }
 
@@ -86,7 +114,6 @@ actor UsageService {
         let newToken = refreshResponse.access_token
         let newRefreshToken = refreshResponse.refresh_token ?? refreshToken
 
-        // Update mirror with refreshed token
         let updated = OAuthCredentials(
             claudeAiOauth: .init(accessToken: newToken, refreshToken: newRefreshToken)
         )
