@@ -119,7 +119,10 @@ final class AppViewModel {
             await historyService.record(weekly: weeklyUtilization, fiveHour: fiveHourUtilization)
             usageHistory = await historyService.getReadings()
         } catch UsageError.rateLimited {
-            // 429 — keep previous data, no error shown
+            // 429 — keep previous data if already connected, show error otherwise
+            if !isConnected {
+                lastError = "Rate limited — retrying shortly"
+            }
         } catch {
             isConnected = false
             lastError = error.localizedDescription
