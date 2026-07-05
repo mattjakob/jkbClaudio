@@ -24,6 +24,12 @@ struct PopoverView: View {
                             errorSection(error)
                         }
                         chartSection
+                        if viewModel.tokenUsage.todayTotal.total > 0 {
+                            TokenStatsCard(usage: viewModel.tokenUsage)
+                        }
+                        if !viewModel.scopedWindows.isEmpty {
+                            scopedWindowsSection
+                        }
                         if viewModel.extraUsageEnabled {
                             extraUsageSection
                         }
@@ -49,8 +55,27 @@ struct PopoverView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 showSettings = false
+                viewModel.popoverOpened()
             }
         }
+    }
+
+    private var scopedWindowsSection: some View {
+        VStack(spacing: 6) {
+            ForEach(viewModel.scopedWindows, id: \.name) { window in
+                HStack {
+                    Text(window.name)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int(window.utilization))%")
+                        .font(.caption2.monospacedDigit())
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var chartSection: some View {
@@ -95,7 +120,7 @@ struct PopoverView: View {
     private var footerSection: some View {
         HStack {
             Button("Refresh") {
-                Task { await viewModel.refresh() }
+                Task { await viewModel.refresh(userInitiated: true) }
             }
             .buttonStyle(.glass)
             .controlSize(.small)
