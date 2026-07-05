@@ -13,6 +13,8 @@ final class AppViewModel {
     var activeSessions: [SessionEntry] = []
     var usageHistory: [UsageReading] = []
     var chartRange: ChartRange = .sevenDay
+    var tokenUsage: TokenUsageSnapshot = .empty
+    var scopedWindows: [NamedUsageWindow] = []
 
     var isConnected = false
     var lastError: String?
@@ -26,7 +28,13 @@ final class AppViewModel {
     var extraUsageUtilization: Double = 0
     var extraUsageUsedDollars: Double = 0
     var extraUsageLimitDollars: Double = 0
-    private var pollTimer: Timer?
+    private let tokenScanner = TokenScanner()
+    private var pollTask: Task<Void, Never>?
+    private var resetBoundaryTask: Task<Void, Never>?
+    private var lastScheduledBoundary: Date?
+    private var lastPopoverOpen: Date?
+    private var hookObserver: NSObjectProtocol?
+    private var scanDebounce: Task<Void, Never>?
     private var activity: NSObjectProtocol?
     private var lastNotifiedWeeklyThreshold: Int = 0
     private var lastNotifiedFiveHourThreshold: Int = 0
@@ -49,46 +57,69 @@ final class AppViewModel {
     }
 
     func startPolling() {
-        guard pollTimer == nil else { return }
+        guard pollTask == nil else { return }
 
         activity = Foundation.ProcessInfo.processInfo.beginActivity(
             options: .userInitiatedAllowingIdleSystemSleep,
             reason: "Background usage polling"
         )
 
-        Task {
-            await historyService.load()
-            usageHistory = await historyService.getReadings()
-            await refresh()
+        hookObserver = NotificationCenter.default.addObserver(
+            forName: .claudioHookEvent, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleTokenScan() }
         }
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+        pollTask = Task { [weak self] in
             guard let self else { return }
-            Task { @MainActor in await self.refresh() }
+            await historyService.load()
+            usageHistory = await historyService.getReadings()
+            while !Task.isCancelled {
+                await refresh()
+                let interval = RefreshPolicy.interval(
+                    hasActiveSessions: !activeSessions.isEmpty,
+                    lastPopoverOpen: lastPopoverOpen,
+                    lowPowerMode: Foundation.ProcessInfo.processInfo.isLowPowerModeEnabled,
+                    thermalState: Foundation.ProcessInfo.processInfo.thermalState
+                )
+                try? await Task.sleep(for: .seconds(interval))
+            }
         }
 
         Task { await bridge.start() }
     }
 
     func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
+        pollTask?.cancel()
+        pollTask = nil
+        resetBoundaryTask?.cancel()
+        resetBoundaryTask = nil
+        if let hookObserver { NotificationCenter.default.removeObserver(hookObserver) }
+        hookObserver = nil
         if let activity { Foundation.ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
         Task { await bridge.stop() }
     }
 
-    func refresh() async {
+    /// Called when the popover becomes visible: bumps cadence and refreshes
+    /// immediately (user-initiated fetches bypass the 429 gate).
+    func popoverOpened() {
+        lastPopoverOpen = Date()
+        Task { await refresh(userInitiated: true) }
+    }
+
+    func refresh(userInitiated: Bool = false) async {
         isLoading = true
         defer { isLoading = false }
 
         do {
-            let usage = try await usageService.fetchUsage()
+            let usage = try await usageService.fetchUsage(userInitiated: userInitiated)
             fiveHourUtilization = usage.fiveHour?.utilization ?? 0
             fiveHourResetsAt = usage.fiveHour?.resetsAtDate
             weeklyUtilization = usage.sevenDay?.utilization ?? 0
             weeklyResetsAt = usage.sevenDay?.resetsAtDate
             opusUtilization = usage.sevenDayOpus?.utilization ?? 0
+            scopedWindows = usage.scopedWindows()
 
             if let extra = usage.extraUsage, extra.isEnabled {
                 extraUsageEnabled = true
@@ -103,9 +134,12 @@ final class AppViewModel {
             lastError = nil
 
             checkUsageMilestones()
+            scheduleResetBoundaryRefresh(for: usage)
 
             await historyService.record(weekly: weeklyUtilization, fiveHour: fiveHourUtilization)
             usageHistory = await historyService.getReadings()
+        } catch UsageError.backoff {
+            // Gated (backoff/429 window) — keep previous data silently.
         } catch UsageError.rateLimited {
             // 429 — keep previous data if already connected, show error otherwise
             if !isConnected {
@@ -118,6 +152,34 @@ final class AppViewModel {
 
         activeSessions = await sessionService.getActiveSessions()
         await bridge.updateWatchedSessions(activeSessions)
+        tokenUsage = await tokenScanner.snapshot()
+    }
+
+    /// One-shot refresh just after the nearest window reset so bars drop to
+    /// zero promptly instead of waiting out the poll interval.
+    private func scheduleResetBoundaryRefresh(for usage: UsageResponse) {
+        let boundaries = [usage.fiveHour?.resetsAtDate, usage.sevenDay?.resetsAtDate]
+            .compactMap { $0 }
+            .filter { $0 > Date() }
+        guard let nearest = boundaries.min(), nearest != lastScheduledBoundary else { return }
+        lastScheduledBoundary = nearest
+        resetBoundaryTask?.cancel()
+        resetBoundaryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(nearest.timeIntervalSinceNow + 2))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
+    }
+
+    /// Debounced local token rescan on hook events (realtime updates while
+    /// a session streams).
+    private func scheduleTokenScan() {
+        scanDebounce?.cancel()
+        scanDebounce = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            tokenUsage = await tokenScanner.snapshot()
+        }
     }
 
     private func checkUsageMilestones() {

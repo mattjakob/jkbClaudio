@@ -134,6 +134,8 @@ actor HookServer {
             sendResponse("{}", connection: connection); return
         }
 
+        NotificationCenter.default.post(name: .claudioHookEvent, object: nil)
+
         if path.contains("/hook/permission") {
             let permissionId = "perm_\(nextPermissionId)"
             nextPermissionId += 1
@@ -191,4 +193,8 @@ actor HookServer {
     private func removeConnection(_ connection: NWConnection) {
         connections.removeAll { $0 === connection }
     }
+}
+
+extension Notification.Name {
+    static let claudioHookEvent = Notification.Name("claudioHookEvent")
 }
