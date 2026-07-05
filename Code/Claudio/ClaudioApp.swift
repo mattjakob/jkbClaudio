@@ -10,7 +10,7 @@ struct ClaudioApp: App {
                 .frame(width: 320, height: 620)
         } label: {
             MenuBarLabel(
-                utilization: viewModel.weeklyUtilization,
+                utilization: viewModel.focusedUtilization,
                 isConnected: viewModel.isConnected,
                 icon: viewModel.menuBarIcon,
                 color: viewModel.menuBarColor

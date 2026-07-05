@@ -12,7 +12,13 @@ final class AppViewModel {
 
     var activeSessions: [SessionEntry] = []
     var usageHistory: [UsageReading] = []
-    var chartRange: ChartRange = .sevenDay
+    /// Focused window for the chart card AND the menu bar indicator.
+    /// Persisted so the selection survives relaunch.
+    var chartRange: ChartRange = ChartRange(
+        rawValue: UserDefaults.standard.string(forKey: "chartRange") ?? ""
+    ) ?? .sevenDay {
+        didSet { UserDefaults.standard.set(chartRange.rawValue, forKey: "chartRange") }
+    }
     var tokenUsage: TokenUsageSnapshot = .empty
     var scopedWindows: [NamedUsageWindow] = []
 
@@ -39,20 +45,25 @@ final class AppViewModel {
     private var lastNotifiedWeeklyThreshold: Int = 0
     private var lastNotifiedFiveHourThreshold: Int = 0
 
+    /// Utilization of whichever window the chart card focuses.
+    var focusedUtilization: Double {
+        chartRange == .sevenDay ? weeklyUtilization : fiveHourUtilization
+    }
+
     var menuBarText: String {
         if !isConnected { return "" }
-        return "\(Int(fiveHourUtilization))%"
+        return "\(Int(focusedUtilization))%"
     }
 
     var menuBarColor: Color {
-        if fiveHourUtilization >= 70 { return .widgetRed }
-        if fiveHourUtilization >= 40 { return .widgetYellow }
+        if focusedUtilization >= 70 { return .widgetRed }
+        if focusedUtilization >= 40 { return .widgetYellow }
         return .white
     }
 
     var menuBarIcon: String {
-        if fiveHourUtilization >= 70 { return "flame.fill" }
-        if fiveHourUtilization >= 40 { return "dog.fill" }
+        if focusedUtilization >= 70 { return "flame.fill" }
+        if focusedUtilization >= 40 { return "dog.fill" }
         return "leaf.fill"
     }
 
