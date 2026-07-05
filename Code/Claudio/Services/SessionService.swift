@@ -6,6 +6,9 @@ struct ProcessInfo: Sendable {
     let elapsedSeconds: Int
     let memoryMB: Double
     let cpuPercent: Double
+    /// Running claude processes descended from this one (Task subagents,
+    /// auto security reviewers, SDK children).
+    let childAgents: Int
 }
 
 actor SessionService {
@@ -31,6 +34,9 @@ actor SessionService {
                 session.elapsedSeconds = info.elapsedSeconds
                 session.memoryMB = info.memoryMB
                 session.cpuPercent = info.cpuPercent
+                // Add live child agent processes on top of the transcript's
+                // pending Task subagents.
+                session.subagentCount += info.childAgents
                 results.append(session)
             }
         }
@@ -288,6 +294,56 @@ actor SessionService {
 
     // MARK: - Process detection
 
+    /// Splits claude PIDs into primary sessions and subagents. A process
+    /// descended from another claude process (through any number of
+    /// intermediate shells) is a subagent, attributed to its TOPMOST claude
+    /// ancestor so nested agents roll up to the interactive session.
+    static func classifyAgents(pids: Set<Int>, parentMap: [Int: Int])
+        -> (primaries: Set<Int>, childCounts: [Int: Int]) {
+        var primaries: Set<Int> = []
+        var childCounts: [Int: Int] = [:]
+
+        for pid in pids {
+            var ancestor = parentMap[pid]
+            var owner: Int?
+            var hops = 0
+            while let current = ancestor, current > 1, hops < 64 {
+                if pids.contains(current), current != pid { owner = current }
+                ancestor = parentMap[current]
+                hops += 1
+            }
+            if let owner {
+                childCounts[owner, default: 0] += 1
+            } else {
+                primaries.insert(pid)
+            }
+        }
+        return (primaries, childCounts)
+    }
+
+    /// Snapshot of pid -> ppid for all processes.
+    private nonisolated func processParentMap() -> [Int: Int] {
+        let pipe = Pipe()
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-ax", "-o", "pid=,ppid="]
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        do { try ps.run(); ps.waitUntilExit() } catch { return [:] }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(),
+                            encoding: .utf8) ?? ""
+        var map: [Int: Int] = [:]
+        for line in output.components(separatedBy: "\n") {
+            let parts = line.trimmingCharacters(in: .whitespaces)
+                .components(separatedBy: .whitespaces)
+                .filter { !$0.isEmpty }
+            guard parts.count >= 2, let pid = Int(parts[0]), let ppid = Int(parts[1]) else { continue }
+            map[pid] = ppid
+        }
+        return map
+    }
+
     private nonisolated func getClaudeProcessInfos() -> [ProcessInfo] {
         let pgrepPipe = Pipe()
         let pgrep = Process()
@@ -299,11 +355,18 @@ actor SessionService {
         do { try pgrep.run(); pgrep.waitUntilExit() } catch { return [] }
 
         let pgrepData = pgrepPipe.fileHandleForReading.readDataToEndOfFile()
-        let pids = String(data: pgrepData, encoding: .utf8)?
+        let allPids = String(data: pgrepData, encoding: .utf8)?
             .components(separatedBy: "\n")
-            .compactMap { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty } ?? []
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? []
 
+        guard !allPids.isEmpty else { return [] }
+
+        // Subagent processes (Task agents, auto reviewers) don't get their
+        // own session row — they count toward their root session's agents.
+        let (primaries, childCounts) = Self.classifyAgents(
+            pids: Set(allPids), parentMap: processParentMap()
+        )
+        let pids = allPids.filter { primaries.contains($0) }.map(String.init)
         guard !pids.isEmpty else { return [] }
 
         // Get process stats via ps
@@ -358,7 +421,8 @@ actor SessionService {
                     path: path,
                     elapsedSeconds: stats.elapsed,
                     memoryMB: stats.memMB,
-                    cpuPercent: stats.cpu
+                    cpuPercent: stats.cpu,
+                    childAgents: childCounts[Int(pid) ?? 0] ?? 0
                 ))
             }
         }
