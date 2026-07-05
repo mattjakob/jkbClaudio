@@ -38,19 +38,75 @@ struct ExtraUsage: Codable, Sendable {
     }
 }
 
+struct LimitScopeModel: Codable, Sendable {
+    let id: String?
+    let displayName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+    }
+}
+
+struct LimitScope: Codable, Sendable {
+    let model: LimitScopeModel?
+}
+
+/// Entry in the newer `limits[]` response shape (superseding flat
+/// `seven_day_*` keys). `is_active` is deliberately ignored — the API
+/// reports false for enforceable scoped limits.
+struct UsageLimit: Codable, Sendable {
+    let kind: String?
+    let group: String?
+    let percent: Double?
+    let resetsAt: String?
+    let scope: LimitScope?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, group, percent, scope
+        case resetsAt = "resets_at"
+    }
+}
+
+struct NamedUsageWindow: Sendable, Equatable {
+    let name: String
+    let utilization: Double
+    let resetsAt: Date?
+}
+
 struct UsageResponse: Codable, Sendable {
     let fiveHour: UsageWindow?
     let sevenDay: UsageWindow?
     let sevenDayOauthApps: UsageWindow?
     let sevenDayOpus: UsageWindow?
+    let sevenDaySonnet: UsageWindow?
     let extraUsage: ExtraUsage?
+    let limits: [UsageLimit]?
 
     enum CodingKeys: String, CodingKey {
         case fiveHour = "five_hour"
         case sevenDay = "seven_day"
         case sevenDayOauthApps = "seven_day_oauth_apps"
         case sevenDayOpus = "seven_day_opus"
+        case sevenDaySonnet = "seven_day_sonnet"
         case extraUsage = "extra_usage"
+        case limits
+    }
+
+    /// Model-scoped windows from `limits[]` that carry displayable data —
+    /// e.g. promo windows for a specific model family.
+    func scopedWindows() -> [NamedUsageWindow] {
+        (limits ?? []).compactMap { limit in
+            guard let percent = limit.percent,
+                  let name = limit.scope?.model?.displayName ?? limit.scope?.model?.id else {
+                return nil
+            }
+            let resets = limit.resetsAt.flatMap {
+                ISO8601DateFormatter.withFractionalSeconds.date(from: $0)
+                    ?? ISO8601DateFormatter.standard.date(from: $0)
+            }
+            return NamedUsageWindow(name: name, utilization: percent, resetsAt: resets)
+        }
     }
 }
 
