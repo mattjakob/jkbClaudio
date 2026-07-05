@@ -1,7 +1,7 @@
 import Charts
 import SwiftUI
 
-enum ChartRange {
+enum ChartRange: String {
     case sevenDay
     case fiveHour
 

@@ -1,10 +1,24 @@
 import Foundation
 
+/// Wraps a single `claude -p ...` subprocess that streams JSON over stdio.
+///
+/// The reader runs as a detached, nonisolated Task using `FileHandle.bytes`
+/// so the actor itself stays free to handle concurrent `write`, `interrupt`,
+/// and `terminate` calls.
 actor ClaudeProcess {
     enum State: Sendable {
         case idle
         case running
         case terminated(code: Int32)
+    }
+
+    enum SpawnError: Error, LocalizedError {
+        case alreadyRunning
+        var errorDescription: String? {
+            switch self {
+            case .alreadyRunning: "Process already running"
+            }
+        }
     }
 
     private var process: Process?
@@ -28,7 +42,7 @@ actor ClaudeProcess {
     }
 
     func spawn(prompt: String, workingDirectory: String) throws {
-        guard case .idle = state else { return }
+        guard case .idle = state else { throw SpawnError.alreadyRunning }
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -60,21 +74,21 @@ actor ClaudeProcess {
         self.stdinPipe = stdin
         self.state = .running
 
-        let handle = stdout.fileHandleForReading
-        readTask = Task { [weak self] in
-            await self?.readLoop(handle: handle)
+        let reader = stdout.fileHandleForReading
+        readTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.runReadLoop(reader: reader)
         }
     }
 
     func write(_ data: Data) {
         guard case .running = state else { return }
-        stdinPipe?.fileHandleForWriting.write(data)
+        try? stdinPipe?.fileHandleForWriting.write(contentsOf: data)
     }
 
     func interrupt() {
         guard case .running = state else { return }
         if let data = SDKOutbound.interrupt() {
-            stdinPipe?.fileHandleForWriting.write(data)
+            try? stdinPipe?.fileHandleForWriting.write(contentsOf: data)
         }
     }
 
@@ -86,52 +100,34 @@ actor ClaudeProcess {
 
     // MARK: - Private
 
-    private func readLoop(handle: FileHandle) async {
-        var buffer = Data()
-
-        while !Task.isCancelled {
-            let chunk: Data = handle.availableData
-            guard !chunk.isEmpty else {
-                // EOF — process ended
-                break
+    /// Nonisolated reader: streams stdout line-by-line without blocking the actor.
+    private nonisolated func runReadLoop(reader: FileHandle) async {
+        do {
+            for try await line in reader.bytes.lines {
+                if Task.isCancelled { break }
+                guard let data = line.data(using: .utf8), !data.isEmpty else { continue }
+                let message = SDKInboundParser.parse(line: data)
+                await self.dispatch(message)
             }
-
-            buffer.append(chunk)
-
-            // Extract complete lines
-            let newline: UInt8 = 0x0A
-            var start = buffer.startIndex
-
-            for i in buffer.indices where buffer[i] == newline {
-                let lineData = Data(buffer[start..<i])
-                start = buffer.index(after: i)
-
-                guard !lineData.isEmpty else { continue }
-                let message = SDKInboundParser.parse(line: lineData)
-
-                // Update local state from system init
-                if case .system(let sid, let m, let c) = message {
-                    sessionId = sid
-                    model = m
-                    cwd = c
-                }
-
-                await onMessage?(message)
-            }
-
-            // Keep remainder
-            if start < buffer.endIndex {
-                buffer = Data(buffer[start...])
-            } else {
-                buffer = Data()
-            }
+        } catch {
+            // EOF or pipe error — termination handler closes out the rest.
         }
+    }
+
+    /// Hops back to the actor to update state and notify the listener.
+    private func dispatch(_ message: SDKInbound) async {
+        if case .system(let sid, let m, let c) = message {
+            sessionId = sid
+            model = m
+            cwd = c
+        }
+        await onMessage?(message)
     }
 
     private func handleTermination(code: Int32) {
         state = .terminated(code: code)
         readTask?.cancel()
         readTask = nil
-        Task { await onExit?(code) }
+        Task { [weak self] in await self?.onExit?(code) }
     }
 }

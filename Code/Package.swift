@@ -10,6 +10,11 @@ let package = Package(
             path: "Claudio",
             exclude: ["Info.plist", "Claudio.entitlements"],
             resources: [.process("Resources")]
+        ),
+        .testTarget(
+            name: "ClaudioTests",
+            dependencies: ["Claudio"],
+            path: "Tests/ClaudioTests"
         )
     ]
 )

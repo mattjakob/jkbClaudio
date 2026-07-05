@@ -1,11 +1,24 @@
 import Foundation
 import Network
 
+/// Local HTTP server that receives Claude Code hook events.
+///
+/// Permission requests are held open via `CheckedContinuation` until either
+/// (a) a UI action resolves them or (b) the per-request timeout fires.
+/// Pending timeout tasks are cancelled on resolve so they don't linger.
 actor HookServer {
+    private static let port: UInt16 = 19876
+    private static let permissionTimeout: Duration = .seconds(110)
+
     private var listener: NWListener?
     private var connections: [NWConnection] = []
-    private var pendingPermissions: [String: CheckedContinuation<HookPermissionResponse, Never>] = [:]
+    private var pending: [String: PendingPermission] = [:]
     private var nextPermissionId: Int = 0
+
+    private struct PendingPermission {
+        let continuation: CheckedContinuation<HookPermissionResponse, Never>
+        let timeoutTask: Task<Void, Never>
+    }
 
     private(set) var onEvent: (@Sendable (HookEvent, String) async -> Void)?
 
@@ -13,18 +26,19 @@ actor HookServer {
         onEvent = handler
     }
 
+    // MARK: - Lifecycle
+
     func start() throws {
         guard listener == nil else { return }
-        guard let port = NWEndpoint.Port(rawValue: 19876) else {
+        guard let nwPort = NWEndpoint.Port(rawValue: Self.port) else {
             throw URLError(.badURL)
         }
-        let params = NWParameters.tcp
-        let newListener = try NWListener(using: params, on: port)
+        let newListener = try NWListener(using: .tcp, on: nwPort)
         self.listener = newListener
 
-        newListener.newConnectionHandler = { [weak self] connection in
-            connection.start(queue: .global())
-            Task { await self?.handleConnection(connection) }
+        newListener.newConnectionHandler = { [weak self] conn in
+            conn.start(queue: .global())
+            Task { await self?.handleConnection(conn) }
         }
 
         newListener.stateUpdateHandler = { [weak self] state in
@@ -39,29 +53,31 @@ actor HookServer {
     func stop() {
         listener?.cancel()
         listener = nil
-        for connection in connections {
-            connection.cancel()
-        }
+        for connection in connections { connection.cancel() }
         connections.removeAll()
 
-        for (_, continuation) in pendingPermissions {
-            continuation.resume(returning: .deny(message: "Server stopped"))
+        for (_, pending) in pending {
+            pending.timeoutTask.cancel()
+            pending.continuation.resume(returning: .deny(message: "Server stopped"))
         }
-        pendingPermissions.removeAll()
+        pending.removeAll()
     }
 
+    // MARK: - Permission resolution
+
     func resolvePermission(id: String, allow: Bool) {
-        guard let continuation = pendingPermissions.removeValue(forKey: id) else { return }
-        if allow {
-            continuation.resume(returning: .allow())
-        } else {
-            continuation.resume(returning: .deny(message: "Denied by user"))
-        }
+        resolvePermission(id: id, response: allow ? .allow() : .deny(message: "Denied by user"))
     }
 
     func resolvePermission(id: String, response: HookPermissionResponse) {
-        guard let continuation = pendingPermissions.removeValue(forKey: id) else { return }
-        continuation.resume(returning: response)
+        guard let entry = pending.removeValue(forKey: id) else { return }
+        entry.timeoutTask.cancel()
+        entry.continuation.resume(returning: response)
+    }
+
+    private func expirePermission(id: String) {
+        guard let entry = pending.removeValue(forKey: id) else { return }
+        entry.continuation.resume(returning: .deny(message: "Permission request timed out"))
     }
 
     // MARK: - Connection handling
@@ -71,7 +87,6 @@ actor HookServer {
         accumulateRequest(connection, buffer: Data())
     }
 
-    /// Reads data from the connection until the full HTTP request (headers + Content-Length body) is received.
     private nonisolated func accumulateRequest(_ connection: NWConnection, buffer: Data) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else { connection.cancel(); return }
@@ -87,33 +102,23 @@ actor HookServer {
         }
     }
 
-    /// Checks whether the accumulated buffer contains a complete HTTP request.
-    /// Uses byte-level search to avoid UTF-8 decode issues with binary payloads.
     private nonisolated static func isRequestComplete(_ data: Data) -> Bool {
-        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A] // \r\n\r\n
-        guard let separatorRange = data.firstRange(of: separator) else {
-            return false
-        }
+        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        guard let separatorRange = data.firstRange(of: separator) else { return false }
 
         let headerData = data[data.startIndex..<separatorRange.lowerBound]
         let bodyStart = separatorRange.upperBound
         let bodyBytes = data.endIndex - bodyStart
 
-        // Parse Content-Length from headers
         guard let headerString = String(data: headerData, encoding: .utf8)?.lowercased() else {
             return false
         }
-
         for line in headerString.split(separator: "\r\n") {
             if line.hasPrefix("content-length:") {
                 let value = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
-                if let cl = Int(value) {
-                    return bodyBytes >= cl
-                }
+                if let cl = Int(value) { return bodyBytes >= cl }
             }
         }
-
-        // No Content-Length — treat what we have as complete
         return true
     }
 
@@ -121,61 +126,51 @@ actor HookServer {
         defer { removeConnection(connection) }
 
         guard let raw = String(data: data, encoding: .utf8) else {
-            sendResponse("{}", connection: connection)
-            return
+            sendResponse("{}", connection: connection); return
         }
 
         let path = parseRequestPath(raw)
-        let event = parseBody(raw)
-
-        guard let event else {
-            sendResponse("{}", connection: connection)
-            return
+        guard let event = parseBody(raw) else {
+            sendResponse("{}", connection: connection); return
         }
 
-        let isPermission = path.contains("/hook/permission")
+        NotificationCenter.default.post(name: .claudioHookEvent, object: nil)
 
-        if isPermission {
+        if path.contains("/hook/permission") {
             let permissionId = "perm_\(nextPermissionId)"
             nextPermissionId += 1
 
             let response: HookPermissionResponse = await withCheckedContinuation { continuation in
-                pendingPermissions[permissionId] = continuation
-
-                Task { [weak self] in
-                    // Notify handler (sends Telegram message) after continuation is registered
-                    await self?.onEvent?(event, permissionId)
-                }
-
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(110))
+                let timeoutTask = Task { [weak self] in
+                    try? await Task.sleep(for: Self.permissionTimeout)
+                    if Task.isCancelled { return }
                     await self?.expirePermission(id: permissionId)
                 }
+                pending[permissionId] = PendingPermission(
+                    continuation: continuation,
+                    timeoutTask: timeoutTask
+                )
+                Task { [weak self] in
+                    await self?.onEvent?(event, permissionId)
+                }
             }
 
-            guard let body = try? JSONEncoder().encode(response),
-                  let bodyString = String(data: body, encoding: .utf8) else {
+            if let body = try? JSONEncoder().encode(response),
+               let bodyString = String(data: body, encoding: .utf8) {
+                sendResponse(bodyString, connection: connection)
+            } else {
                 sendResponse("{}", connection: connection)
-                return
             }
-            sendResponse(bodyString, connection: connection)
         } else {
             await onEvent?(event, "")
             sendResponse("{}", connection: connection)
         }
     }
 
-    private func expirePermission(id: String) {
-        guard let continuation = pendingPermissions.removeValue(forKey: id) else { return }
-        continuation.resume(returning: .deny(message: "Permission request timed out"))
-    }
-
-    // MARK: - HTTP parsing
+    // MARK: - HTTP parsing & response
 
     private nonisolated func parseRequestPath(_ raw: String) -> String {
-        guard let firstLine = raw.split(separator: "\r\n", maxSplits: 1).first else {
-            return ""
-        }
+        guard let firstLine = raw.split(separator: "\r\n", maxSplits: 1).first else { return "" }
         let parts = firstLine.split(separator: " ")
         guard parts.count >= 2 else { return "" }
         return String(parts[1])
@@ -188,12 +183,9 @@ actor HookServer {
         return try? JSONDecoder().decode(HookEvent.self, from: bodyData)
     }
 
-    // MARK: - HTTP response
-
     private nonisolated func sendResponse(_ body: String, connection: NWConnection) {
         let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
-        let data = Data(response.utf8)
-        connection.send(content: data, completion: .contentProcessed { _ in
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
             connection.cancel()
         })
     }
@@ -201,4 +193,8 @@ actor HookServer {
     private func removeConnection(_ connection: NWConnection) {
         connections.removeAll { $0 === connection }
     }
+}
+
+extension Notification.Name {
+    static let claudioHookEvent = Notification.Name("claudioHookEvent")
 }
