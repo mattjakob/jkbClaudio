@@ -52,6 +52,20 @@ import Foundation
         #expect(a.total == 110)
     }
 
+    @Test func percentageSharesSumTo100() {
+        #expect(percentageShares([1, 1, 1]).reduce(0, +) == 100)
+        #expect(percentageShares([1, 1, 1, 1, 1, 1]).reduce(0, +) == 100)
+        #expect(percentageShares([997, 2, 1]).reduce(0, +) == 100)
+        #expect(percentageShares([50, 50]) == [50, 50])
+        #expect(percentageShares([]) == [])
+        #expect(percentageShares([0, 0]) == [0, 0])
+    }
+
+    @Test func percentageSharesProportional() {
+        let shares = percentageShares([750, 250])
+        #expect(shares == [75, 25])
+    }
+
     @Test func compactFormatting() {
         #expect(compactTokens(950) == "950")
         #expect(compactTokens(12_400) == "12.4K")

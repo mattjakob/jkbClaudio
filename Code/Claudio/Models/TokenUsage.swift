@@ -115,6 +115,25 @@ enum TokenLineParser {
     }
 }
 
+/// Integer percentage shares of `values` that always sum to exactly 100,
+/// via largest-remainder rounding. Empty or all-zero input returns zeros.
+func percentageShares(_ values: [Int]) -> [Int] {
+    let total = values.reduce(0, +)
+    guard total > 0 else { return values.map { _ in 0 } }
+
+    let exact = values.map { Double($0) * 100 / Double(total) }
+    var shares = exact.map { Int($0) }
+    var remainder = 100 - shares.reduce(0, +)
+
+    let byRemainder = exact.enumerated()
+        .sorted { ($0.element - $0.element.rounded(.down)) > ($1.element - $1.element.rounded(.down)) }
+    for (index, _) in byRemainder where remainder > 0 {
+        shares[index] += 1
+        remainder -= 1
+    }
+    return shares
+}
+
 func compactTokens(_ n: Int) -> String {
     switch n {
     case ..<1000: return "\(n)"

@@ -10,25 +10,15 @@ struct TokenStatsCard: View {
                 .fontWeight(.semibold)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 0) {
-                stat("In", usage.todayTotal.input)
-                stat("Out", usage.todayTotal.output)
-                stat("Cache W", usage.todayTotal.cacheCreate)
-                stat("Cache R", usage.todayTotal.cacheRead)
-            }
-
-            if !usage.today.isEmpty {
-                Divider()
-                ForEach(sortedModels, id: \.0) { model, counts in
-                    HStack {
-                        Text(shortModelName(model))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer()
-                        Text(compactTokens(counts.total))
-                            .font(.caption2.monospacedDigit())
-                    }
+            ForEach(modelShares, id: \.0) { model, percent in
+                HStack {
+                    Text(shortModelName(model))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Text("\(percent)%")
+                        .font(.caption2.monospacedDigit())
                 }
             }
         }
@@ -37,20 +27,12 @@ struct TokenStatsCard: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private var sortedModels: [(String, TokenCounts)] {
-        usage.today.sorted { $0.value.total > $1.value.total }
-    }
-
-    private func stat(_ label: String, _ value: Int) -> some View {
-        VStack(spacing: 2) {
-            Text(compactTokens(value))
-                .font(.callout.monospacedDigit())
-                .fontWeight(.medium)
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
+    /// Models sorted by usage, each with its share of today's total tokens.
+    /// Shares always sum to 100.
+    private var modelShares: [(String, Int)] {
+        let sorted = usage.today.sorted { $0.value.total > $1.value.total }
+        let shares = percentageShares(sorted.map(\.value.total))
+        return zip(sorted.map(\.key), shares).map { ($0, $1) }
     }
 
     private func shortModelName(_ model: String) -> String {
