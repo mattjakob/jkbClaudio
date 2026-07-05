@@ -32,6 +32,62 @@ import Foundation
     }
 }
 
+@Suite struct PrimaryTranscriptPickerTests {
+    private let t0 = Date(timeIntervalSince1970: 1_000_000)  // process start
+
+    private func f(_ name: String, mtimeOffset: TimeInterval, birthOffset: TimeInterval)
+        -> (file: String, mtime: Date, birth: Date) {
+        (name, t0.addingTimeInterval(mtimeOffset), t0.addingTimeInterval(birthOffset))
+    }
+
+    @Test func prefersPrimaryOverLaterBornSubagents() {
+        // Main session born at start, still writing; two subagents born later.
+        let picked = SessionService.pickPrimaryTranscript([
+            f("main", mtimeOffset: 4000, birthOffset: 5),
+            f("reviewer", mtimeOffset: 3990, birthOffset: 3200),
+            f("task-agent", mtimeOffset: 3995, birthOffset: 3600)
+        ], processStart: t0)
+        #expect(picked?.file == "main")
+    }
+
+    @Test func ignoresSessionEndedJustBeforeStart() {
+        // Regression: a prior session ended 36 s before this process started
+        // (earlier birth) must not steal attribution from the live session.
+        let picked = SessionService.pickPrimaryTranscript([
+            f("stale", mtimeOffset: -36, birthOffset: -52),
+            f("main", mtimeOffset: 4000, birthOffset: 5)
+        ], processStart: t0)
+        #expect(picked?.file == "main")
+    }
+
+    @Test func ignoresStaleFileThatStoppedGrowing() {
+        // A file written briefly after start but idle for over 10 min loses
+        // to the file still being written, even with an earlier birth.
+        let picked = SessionService.pickPrimaryTranscript([
+            f("stopped", mtimeOffset: 60, birthOffset: -9000),
+            f("main", mtimeOffset: 4000, birthOffset: 5)
+        ], processStart: t0)
+        #expect(picked?.file == "main")
+    }
+
+    @Test func resumedSessionKeepsOldBirth() {
+        // claude --resume: old birth, actively written -> still wins.
+        let picked = SessionService.pickPrimaryTranscript([
+            f("resumed", mtimeOffset: 4000, birthOffset: -86_400),
+            f("reviewer", mtimeOffset: 3990, birthOffset: 3200)
+        ], processStart: t0)
+        #expect(picked?.file == "resumed")
+    }
+
+    @Test func noProcessStartFallsBackToNewest() {
+        let picked = SessionService.pickPrimaryTranscript([
+            f("old", mtimeOffset: -500, birthOffset: -900),
+            f("new", mtimeOffset: -10, birthOffset: -300)
+        ], processStart: nil)
+        #expect(picked?.file == "new")
+    }
+}
+
 @Suite struct RefreshPolicyTests {
     private let now = Date(timeIntervalSince1970: 1_000_000)
 

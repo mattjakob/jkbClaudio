@@ -87,19 +87,9 @@ actor SessionService {
                 stats.append((file, mtime, birth))
             }
 
-            // The primary session's transcript is the EARLIEST-created file
-            // among those written since the process started — subagent
-            // transcripts (reviewers, Task agents) are created later, so
-            // "newest mtime" would mis-attribute the row while agents run.
-            var chosen: (file: String, mtime: Date, birth: Date)?
-            if let processStart {
-                let sinceStart = stats.filter { $0.mtime >= processStart.addingTimeInterval(-60) }
-                chosen = sinceStart.min { $0.birth < $1.birth }
+            guard let picked = Self.pickPrimaryTranscript(stats, processStart: processStart) else {
+                continue
             }
-            if chosen == nil {
-                chosen = stats.max { $0.mtime < $1.mtime }
-            }
-            guard let picked = chosen else { continue }
             let file = picked.file
             let latestMtime = picked.mtime
 
@@ -166,6 +156,34 @@ actor SessionService {
     }
 
     private var enrichCaches: [String: EnrichCache] = [:]
+
+    /// Picks the primary session's transcript from a project directory.
+    ///
+    /// The primary's transcript is the EARLIEST-created file among those
+    /// still being written since the process started — subagent transcripts
+    /// (reviewers, Task agents) are created later, so "newest mtime" would
+    /// mis-attribute the row while agents run. Two guards:
+    ///  - mtime >= processStart - 5 s: excludes sessions that ended just
+    ///    before this process launched (observed 36 s gap in the wild).
+    ///  - mtime within 10 min of the newest candidate: excludes stale files
+    ///    that stopped growing long ago but passed the start filter.
+    static func pickPrimaryTranscript(
+        _ stats: [(file: String, mtime: Date, birth: Date)],
+        processStart: Date?
+    ) -> (file: String, mtime: Date, birth: Date)? {
+        if let processStart {
+            let sinceStart = stats.filter { $0.mtime >= processStart.addingTimeInterval(-5) }
+            if let newest = sinceStart.map(\.mtime).max() {
+                let activeWriters = sinceStart.filter {
+                    $0.mtime >= newest.addingTimeInterval(-600)
+                }
+                if let chosen = activeWriters.min(by: { $0.birth < $1.birth }) {
+                    return chosen
+                }
+            }
+        }
+        return stats.max { $0.mtime < $1.mtime }
+    }
 
     private func enrichSession(_ session: inout SessionEntry) {
         let fm = FileManager.default
