@@ -14,14 +14,9 @@ struct SessionEntry: Codable, Identifiable, Sendable {
     let isSidechain: Bool
 
     // Rich stats (parsed from .jsonl when available)
-    var userMessages: Int = 0
     var assistantTurns: Int = 0
-    var toolCalls: Int = 0
     var subagentCount: Int = 0
-    var tokensIn: Int64 = 0
-    var tokensOut: Int64 = 0
     var model: String?
-    var topTools: [String: Int] = [:]
     var permissionMode: String?
     var totalDurationMs: Int64 = 0
 

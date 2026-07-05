@@ -27,7 +27,9 @@ actor SessionService {
         var usedSessionPaths: Set<String> = []
 
         for info in processInfos {
-            if var session = findSessionForPath(info.path, excluding: usedSessionPaths) {
+            let processStart = Date().addingTimeInterval(-Double(info.elapsedSeconds))
+            if var session = findSessionForPath(info.path, excluding: usedSessionPaths,
+                                                processStart: processStart) {
                 if !session.fullPath.isEmpty { usedSessionPaths.insert(session.fullPath) }
                 enrichSession(&session)
                 session.pid = Int(info.pid) ?? 0
@@ -53,6 +55,7 @@ actor SessionService {
             }
         }
 
+        pruneEnrichCaches()
         return results.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
     }
 
@@ -64,7 +67,8 @@ actor SessionService {
     /// jsonl was modified minutes ago). The index is still queried for
     /// metadata enrichment (firstPrompt, summary, gitBranch) when an entry
     /// matching the chosen file exists.
-    private func findSessionForPath(_ projectPath: String, excluding usedPaths: Set<String> = []) -> SessionEntry? {
+    private func findSessionForPath(_ projectPath: String, excluding usedPaths: Set<String> = [],
+                                    processStart: Date? = nil) -> SessionEntry? {
         let fm = FileManager.default
         let dirName = projectPath.replacingOccurrences(of: "/", with: "-")
         let candidates = [dirName] + parentDirNames(dirName)
@@ -73,17 +77,31 @@ actor SessionService {
             let dirPath = "\(projectsDir)/\(candidate)"
             guard let files = try? fm.contentsOfDirectory(atPath: dirPath) else { continue }
 
-            // Pick the .jsonl with the most recent fs mtime.
-            var latestFile: String?
-            var latestMtime: Date = .distantPast
+            var stats: [(file: String, mtime: Date, birth: Date)] = []
             for file in files where file.hasSuffix(".jsonl") {
                 let filePath = "\(dirPath)/\(file)"
                 if usedPaths.contains(filePath) { continue }
                 guard let attrs = try? fm.attributesOfItem(atPath: filePath),
                       let mtime = attrs[.modificationDate] as? Date else { continue }
-                if mtime > latestMtime { latestMtime = mtime; latestFile = file }
+                let birth = (attrs[.creationDate] as? Date) ?? mtime
+                stats.append((file, mtime, birth))
             }
-            guard let file = latestFile else { continue }
+
+            // The primary session's transcript is the EARLIEST-created file
+            // among those written since the process started — subagent
+            // transcripts (reviewers, Task agents) are created later, so
+            // "newest mtime" would mis-attribute the row while agents run.
+            var chosen: (file: String, mtime: Date, birth: Date)?
+            if let processStart {
+                let sinceStart = stats.filter { $0.mtime >= processStart.addingTimeInterval(-60) }
+                chosen = sinceStart.min { $0.birth < $1.birth }
+            }
+            if chosen == nil {
+                chosen = stats.max { $0.mtime < $1.mtime }
+            }
+            guard let picked = chosen else { continue }
+            let file = picked.file
+            let latestMtime = picked.mtime
 
             let fullPath = "\(dirPath)/\(file)"
             let sessionId = String(file.dropLast(6))
@@ -131,117 +149,127 @@ actor SessionService {
         )
     }
 
+    /// Per-transcript running aggregates so each poll parses only bytes
+    /// appended since the last one. Only metrics with actual consumers
+    /// (SessionRow, Telegram /status) are computed.
+    private struct EnrichCache {
+        var parsedBytes = 0
+        var assistantTurns = 0
+        var totalDurationMs: Int64 = 0
+        var pendingTaskIds: Set<String> = []
+        var completedTaskIds: Set<String> = []
+        var model: String?
+        var gitBranch: String?
+        var firstPrompt: String?
+        var permissionMode: String?
+        var lastAccess = Date()
+    }
+
+    private var enrichCaches: [String: EnrichCache] = [:]
+
     private func enrichSession(_ session: inout SessionEntry) {
         let fm = FileManager.default
         guard !session.fullPath.isEmpty,
-              let data = fm.contents(atPath: session.fullPath) else { return }
+              let attrs = try? fm.attributesOfItem(atPath: session.fullPath),
+              let size = (attrs[.size] as? NSNumber)?.intValue else { return }
 
-        // Get actual filesystem mtime (ground truth for last activity)
-        if let attrs = try? fm.attributesOfItem(atPath: session.fullPath),
-           let mtime = attrs[.modificationDate] as? Date {
+        // Actual filesystem mtime (ground truth for last activity).
+        if let mtime = attrs[.modificationDate] as? Date {
             session.actualFileMtime = Int64(mtime.timeIntervalSince1970 * 1000)
         }
 
-        let lines = data.split(separator: UInt8(ascii: "\n"))
-        var userMsgs = 0
-        var assistantTurns = 0
-        var toolCalls = 0
-        var taskToolUseIds: Set<String> = []
-        var completedTaskIds: Set<String> = []
-        var tokensIn: Int64 = 0
-        var tokensOut: Int64 = 0
-        var totalDurationMs: Int64 = 0
-        var tools: [String: Int] = [:]
-        var branch: String?
-        var model: String?
-        var firstPrompt: String?
-        var permissionMode: String?
+        var cache = enrichCaches[session.fullPath] ?? EnrichCache()
+        if size < cache.parsedBytes { cache = EnrichCache() }  // rewritten/truncated
 
-        for line in lines {
-            guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-
-            let type = obj["type"] as? String ?? ""
-
-            if branch == nil, let b = obj["gitBranch"] as? String {
-                branch = b
-            }
-
-            if type == "user" {
-                userMsgs += 1
-                if permissionMode == nil, let pm = obj["permissionMode"] as? String {
-                    permissionMode = pm
+        if size > cache.parsedBytes,
+           let handle = FileHandle(forReadingAtPath: session.fullPath) {
+            defer { try? handle.close() }
+            if (try? handle.seek(toOffset: UInt64(cache.parsedBytes))) != nil,
+               let data = try? handle.readToEnd(), !data.isEmpty,
+               let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
+                let complete = data[data.startIndex...lastNewline]
+                for line in complete.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: true) {
+                    parseTranscriptLine(Data(line), into: &cache)
                 }
-                // Capture durationMs from tool use results
-                if let result = obj["toolUseResult"] as? [String: Any] {
-                    if let dur = result["durationMs"] as? Int64 {
-                        totalDurationMs += dur
-                    } else if let dur = result["durationMs"] as? Int {
-                        totalDurationMs += Int64(dur)
-                    }
-                }
-                if let msg = obj["message"] as? [String: Any] {
-                    if firstPrompt == nil, let content = msg["content"] as? String {
-                        firstPrompt = String(content.prefix(80))
-                    }
-                    if let content = msg["content"] as? [[String: Any]] {
-                        for block in content {
-                            if block["type"] as? String == "tool_result",
-                               let toolUseId = block["tool_use_id"] as? String,
-                               taskToolUseIds.contains(toolUseId) {
-                                completedTaskIds.insert(toolUseId)
-                            }
-                        }
-                    }
-                }
-            }
-
-            if type == "assistant" {
-                assistantTurns += 1
-                if let msg = obj["message"] as? [String: Any] {
-                    if model == nil, let m = msg["model"] as? String {
-                        model = m
-                    }
-                    if let usage = msg["usage"] as? [String: Any] {
-                        tokensIn += (usage["input_tokens"] as? Int64) ?? Int64(usage["input_tokens"] as? Int ?? 0)
-                        tokensIn += (usage["cache_read_input_tokens"] as? Int64) ?? Int64(usage["cache_read_input_tokens"] as? Int ?? 0)
-                        tokensOut += (usage["output_tokens"] as? Int64) ?? Int64(usage["output_tokens"] as? Int ?? 0)
-                    }
-                    if let content = msg["content"] as? [[String: Any]] {
-                        for block in content {
-                            if block["type"] as? String == "tool_use" {
-                                toolCalls += 1
-                                let name = block["name"] as? String ?? "unknown"
-                                tools[name, default: 0] += 1
-                                if name == "Task", let id = block["id"] as? String {
-                                    taskToolUseIds.insert(id)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if type == "system" {
-                if let dur = obj["durationMs"] as? Int64 {
-                    totalDurationMs += dur
-                } else if let dur = obj["durationMs"] as? Int {
-                    totalDurationMs += Int64(dur)
-                }
+                cache.parsedBytes += complete.count
             }
         }
 
-        session.userMessages = userMsgs
-        session.assistantTurns = assistantTurns
-        session.toolCalls = toolCalls
-        session.subagentCount = taskToolUseIds.count - completedTaskIds.count
-        session.tokensIn = tokensIn
-        session.tokensOut = tokensOut
-        session.topTools = tools
-        session.totalDurationMs = totalDurationMs
-        if let permissionMode { session.permissionMode = permissionMode }
-        if let branch { session.gitBranch = branch }
-        if let model { session.model = model }
-        if session.firstPrompt == nil, let firstPrompt { session.firstPrompt = firstPrompt }
+        cache.lastAccess = Date()
+        enrichCaches[session.fullPath] = cache
+
+        session.assistantTurns = cache.assistantTurns
+        session.subagentCount = max(0, cache.pendingTaskIds.count - cache.completedTaskIds.count)
+        session.totalDurationMs = cache.totalDurationMs
+        if let permissionMode = cache.permissionMode { session.permissionMode = permissionMode }
+        if let branch = cache.gitBranch { session.gitBranch = branch }
+        if let model = cache.model { session.model = model }
+        if session.firstPrompt == nil, let firstPrompt = cache.firstPrompt {
+            session.firstPrompt = firstPrompt
+        }
+    }
+
+    private func parseTranscriptLine(_ line: Data, into cache: inout EnrichCache) {
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        let type = obj["type"] as? String ?? ""
+
+        if cache.gitBranch == nil, let b = obj["gitBranch"] as? String {
+            cache.gitBranch = b
+        }
+
+        switch type {
+        case "user":
+            if cache.permissionMode == nil, let pm = obj["permissionMode"] as? String {
+                cache.permissionMode = pm
+            }
+            if let result = obj["toolUseResult"] as? [String: Any],
+               let dur = (result["durationMs"] as? Int64) ?? (result["durationMs"] as? Int).map(Int64.init) {
+                cache.totalDurationMs += dur
+            }
+            if let msg = obj["message"] as? [String: Any] {
+                if cache.firstPrompt == nil, let content = msg["content"] as? String {
+                    cache.firstPrompt = String(content.prefix(80))
+                }
+                if let content = msg["content"] as? [[String: Any]] {
+                    for block in content
+                    where block["type"] as? String == "tool_result" {
+                        if let toolUseId = block["tool_use_id"] as? String,
+                           cache.pendingTaskIds.contains(toolUseId) {
+                            cache.completedTaskIds.insert(toolUseId)
+                        }
+                    }
+                }
+            }
+
+        case "assistant":
+            cache.assistantTurns += 1
+            if let msg = obj["message"] as? [String: Any] {
+                if cache.model == nil, let m = msg["model"] as? String, m != "<synthetic>" {
+                    cache.model = m
+                }
+                if let content = msg["content"] as? [[String: Any]] {
+                    for block in content where block["type"] as? String == "tool_use" {
+                        if block["name"] as? String == "Task", let id = block["id"] as? String {
+                            cache.pendingTaskIds.insert(id)
+                        }
+                    }
+                }
+            }
+
+        case "system":
+            if let dur = (obj["durationMs"] as? Int64) ?? (obj["durationMs"] as? Int).map(Int64.init) {
+                cache.totalDurationMs += dur
+            }
+
+        default:
+            break
+        }
+    }
+
+    /// Drop caches for transcripts not touched in a while (ended sessions).
+    private func pruneEnrichCaches() {
+        let cutoff = Date().addingTimeInterval(-1800)
+        enrichCaches = enrichCaches.filter { $0.value.lastAccess > cutoff }
     }
 
     private func parentDirNames(_ dirName: String) -> [String] {
@@ -299,9 +327,9 @@ actor SessionService {
     /// intermediate shells) is a subagent, attributed to its TOPMOST claude
     /// ancestor so nested agents roll up to the interactive session.
     static func classifyAgents(pids: Set<Int>, parentMap: [Int: Int])
-        -> (primaries: Set<Int>, childCounts: [Int: Int]) {
+        -> (primaries: Set<Int>, owners: [Int: Int]) {
         var primaries: Set<Int> = []
-        var childCounts: [Int: Int] = [:]
+        var owners: [Int: Int] = [:]
 
         for pid in pids {
             var ancestor = parentMap[pid]
@@ -313,12 +341,12 @@ actor SessionService {
                 hops += 1
             }
             if let owner {
-                childCounts[owner, default: 0] += 1
+                owners[pid] = owner
             } else {
                 primaries.insert(pid)
             }
         }
-        return (primaries, childCounts)
+        return (primaries, owners)
     }
 
     /// Snapshot of pid -> ppid for all processes.
@@ -363,17 +391,19 @@ actor SessionService {
 
         // Subagent processes (Task agents, auto reviewers) don't get their
         // own session row — they count toward their root session's agents.
-        let (primaries, childCounts) = Self.classifyAgents(
+        let (primaries, owners) = Self.classifyAgents(
             pids: Set(allPids), parentMap: processParentMap()
         )
         let pids = allPids.filter { primaries.contains($0) }.map(String.init)
         guard !pids.isEmpty else { return [] }
 
-        // Get process stats via ps
+        // Stats for ALL agent processes: children's memory/CPU roll up into
+        // their owning session so the row reflects the whole agent tree.
         let psPipe = Pipe()
         let ps = Process()
         ps.executableURL = URL(fileURLWithPath: "/bin/ps")
-        ps.arguments = ["-p", pids.joined(separator: ","), "-o", "pid=,etime=,rss=,%cpu="]
+        ps.arguments = ["-p", allPids.map(String.init).joined(separator: ","),
+                        "-o", "pid=,etime=,rss=,%cpu="]
         ps.standardOutput = psPipe
         ps.standardError = FileHandle.nullDevice
 
@@ -393,6 +423,17 @@ actor SessionService {
             let rssKB = Double(parts[2]) ?? 0
             let cpu = Double(parts[3]) ?? 0
             pidStats[pid] = (elapsed, rssKB / 1024.0, cpu)
+        }
+
+        // Fold each child's memory/CPU into its owning primary.
+        var childCounts: [Int: Int] = [:]
+        var childMem: [Int: Double] = [:]
+        var childCpu: [Int: Double] = [:]
+        for (child, owner) in owners {
+            childCounts[owner, default: 0] += 1
+            let stats = pidStats[String(child)] ?? (0, 0, 0)
+            childMem[owner, default: 0] += stats.memMB
+            childCpu[owner, default: 0] += stats.cpu
         }
 
         // Get CWDs via lsof
@@ -416,13 +457,14 @@ actor SessionService {
             } else if line.hasPrefix("n/"), let pid = currentPid {
                 let path = String(line.dropFirst(1))
                 let stats = pidStats[pid] ?? (0, 0, 0)
+                let pidInt = Int(pid) ?? 0
                 results.append(ProcessInfo(
                     pid: pid,
                     path: path,
                     elapsedSeconds: stats.elapsed,
-                    memoryMB: stats.memMB,
-                    cpuPercent: stats.cpu,
-                    childAgents: childCounts[Int(pid) ?? 0] ?? 0
+                    memoryMB: stats.memMB + (childMem[pidInt] ?? 0),
+                    cpuPercent: stats.cpu + (childCpu[pidInt] ?? 0),
+                    childAgents: childCounts[pidInt] ?? 0
                 ))
             }
         }
