@@ -12,9 +12,6 @@ actor SessionService {
     private let claudeDir: String
     private let projectsDir: String
 
-    // Cache for indexed sessions — invalidated when directory mtime changes
-    private var indexCache: [String: (mtime: Date, entries: [SessionEntry])] = [:]
-
     init() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         self.claudeDir = "\(home)/.claude"
@@ -53,6 +50,14 @@ actor SessionService {
         return results.sorted { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }
     }
 
+    /// Resolves the most recently active session JSONL for a process cwd.
+    ///
+    /// Selection is by real filesystem mtime, NOT by the `modified` field in
+    /// `sessions-index.json` — that field is not reliably updated by Claude
+    /// Code (observed entries from 60+ days ago in indexes whose project
+    /// jsonl was modified minutes ago). The index is still queried for
+    /// metadata enrichment (firstPrompt, summary, gitBranch) when an entry
+    /// matching the chosen file exists.
     private func findSessionForPath(_ projectPath: String, excluding usedPaths: Set<String> = []) -> SessionEntry? {
         let fm = FileManager.default
         let dirName = projectPath.replacingOccurrences(of: "/", with: "-")
@@ -60,53 +65,62 @@ actor SessionService {
 
         for candidate in candidates {
             let dirPath = "\(projectsDir)/\(candidate)"
-
-            let indexPath = "\(dirPath)/sessions-index.json"
-            if let data = fm.contents(atPath: indexPath),
-               let index = try? JSONDecoder().decode(SessionsIndex.self, from: data),
-               let latest = index.entries
-                .filter({ !usedPaths.contains($0.fullPath) })
-                .sorted(by: { ($0.modifiedDate ?? .distantPast) > ($1.modifiedDate ?? .distantPast) }).first {
-                return latest
-            }
-
             guard let files = try? fm.contentsOfDirectory(atPath: dirPath) else { continue }
-            let jsonlFiles = files.filter { $0.hasSuffix(".jsonl") }
 
+            // Pick the .jsonl with the most recent fs mtime.
             var latestFile: String?
             var latestMtime: Date = .distantPast
-
-            for file in jsonlFiles {
+            for file in files where file.hasSuffix(".jsonl") {
                 let filePath = "\(dirPath)/\(file)"
                 if usedPaths.contains(filePath) { continue }
                 guard let attrs = try? fm.attributesOfItem(atPath: filePath),
                       let mtime = attrs[.modificationDate] as? Date else { continue }
-                if mtime > latestMtime {
-                    latestMtime = mtime
-                    latestFile = file
-                }
+                if mtime > latestMtime { latestMtime = mtime; latestFile = file }
             }
+            guard let file = latestFile else { continue }
 
-            if let file = latestFile {
-                let sessionId = String(file.dropLast(6))
+            let fullPath = "\(dirPath)/\(file)"
+            let sessionId = String(file.dropLast(6))
+            let modifiedISO = ISO8601DateFormatter.standard.string(from: latestMtime)
+
+            // Optional metadata from index.
+            if let data = fm.contents(atPath: "\(dirPath)/sessions-index.json"),
+               let index = try? JSONDecoder().decode(SessionsIndex.self, from: data),
+               let entry = index.entries.first(where: { $0.fullPath == fullPath || $0.sessionId == sessionId }) {
+                // Override the index's stale `modified` with the real one.
                 return SessionEntry(
-                    sessionId: sessionId,
-                    fullPath: "\(dirPath)/\(file)",
+                    sessionId: entry.sessionId,
+                    fullPath: fullPath,
                     fileMtime: Int64(latestMtime.timeIntervalSince1970 * 1000),
-                    firstPrompt: nil, summary: nil, messageCount: 0,
-                    created: ISO8601DateFormatter.standard.string(from: latestMtime),
-                    modified: ISO8601DateFormatter.standard.string(from: latestMtime),
-                    gitBranch: nil, projectPath: projectPath, isSidechain: false
+                    firstPrompt: entry.firstPrompt,
+                    summary: entry.summary,
+                    messageCount: entry.messageCount,
+                    created: entry.created,
+                    modified: modifiedISO,
+                    gitBranch: entry.gitBranch,
+                    projectPath: projectPath,
+                    isSidechain: entry.isSidechain
                 )
             }
+
+            return SessionEntry(
+                sessionId: sessionId,
+                fullPath: fullPath,
+                fileMtime: Int64(latestMtime.timeIntervalSince1970 * 1000),
+                firstPrompt: nil, summary: nil, messageCount: 0,
+                created: modifiedISO, modified: modifiedISO,
+                gitBranch: nil, projectPath: projectPath, isSidechain: false
+            )
         }
 
+        // No jsonl found anywhere — return a placeholder with current time so
+        // the row at least shows a valid (zero) idle duration.
+        let nowISO = ISO8601DateFormatter.standard.string(from: Date())
         return SessionEntry(
             sessionId: UUID().uuidString, fullPath: "",
             fileMtime: Int64(Date().timeIntervalSince1970 * 1000),
             firstPrompt: nil, summary: nil, messageCount: 0,
-            created: ISO8601DateFormatter.standard.string(from: Date()),
-            modified: ISO8601DateFormatter.standard.string(from: Date()),
+            created: nowISO, modified: nowISO,
             gitBranch: nil, projectPath: projectPath, isSidechain: false
         )
     }
@@ -234,27 +248,40 @@ actor SessionService {
         return results
     }
 
+    /// Returns sessions whose .jsonl was modified within the last 5 minutes —
+    /// used to keep recently-ended sessions visible briefly. Real fs mtime
+    /// only; the sessions-index.json's `modified` field is unreliable.
     private func loadAllSessions() -> [SessionEntry] {
         let fm = FileManager.default
         guard let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) else { return [] }
+        let cutoff = Date().addingTimeInterval(-300)
 
         var sessions: [SessionEntry] = []
         for dir in projectDirs {
             let dirPath = "\(projectsDir)/\(dir)"
-            let indexPath = "\(dirPath)/sessions-index.json"
+            // Skip whole project dir if it hasn't been touched recently. This
+            // avoids walking jsonls in dormant projects (potentially 100+).
+            guard let dirMtime = (try? fm.attributesOfItem(atPath: dirPath))?[.modificationDate] as? Date,
+                  dirMtime > cutoff else { continue }
+            guard let files = try? fm.contentsOfDirectory(atPath: dirPath) else { continue }
 
-            // Check directory mtime for cache invalidation
-            let dirMtime = (try? fm.attributesOfItem(atPath: dirPath))?[.modificationDate] as? Date
+            for file in files where file.hasSuffix(".jsonl") {
+                let filePath = "\(dirPath)/\(file)"
+                guard let attrs = try? fm.attributesOfItem(atPath: filePath),
+                      let mtime = attrs[.modificationDate] as? Date,
+                      mtime > cutoff else { continue }
 
-            if let dirMtime, let cached = indexCache[dir], cached.mtime == dirMtime {
-                sessions.append(contentsOf: cached.entries)
-                continue
+                let projectPath = "/" + dir.dropFirst().replacingOccurrences(of: "-", with: "/")
+                let modifiedISO = ISO8601DateFormatter.standard.string(from: mtime)
+                sessions.append(SessionEntry(
+                    sessionId: String(file.dropLast(6)),
+                    fullPath: filePath,
+                    fileMtime: Int64(mtime.timeIntervalSince1970 * 1000),
+                    firstPrompt: nil, summary: nil, messageCount: 0,
+                    created: modifiedISO, modified: modifiedISO,
+                    gitBranch: nil, projectPath: projectPath, isSidechain: false
+                ))
             }
-
-            guard let data = fm.contents(atPath: indexPath) else { continue }
-            guard let index = try? JSONDecoder().decode(SessionsIndex.self, from: data) else { continue }
-            indexCache[dir] = (mtime: dirMtime ?? .distantPast, entries: index.entries)
-            sessions.append(contentsOf: index.entries)
         }
         return sessions
     }

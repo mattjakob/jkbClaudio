@@ -58,6 +58,20 @@ struct OAuthCredentials: Codable, Sendable {
     struct ClaudeAiOauth: Codable, Sendable {
         let accessToken: String
         let refreshToken: String
+        /// Token expiration in milliseconds since Unix epoch. Optional because
+        /// older `.credentials.json` versions and some keychain rewrites may
+        /// omit it.
+        let expiresAt: Double?
+        let subscriptionType: String?
+        let scopes: [String]?
     }
     let claudeAiOauth: ClaudeAiOauth
+
+    /// True if the access token is expired or within `buffer` of expiry.
+    /// Returns true when no expiry is recorded (fail safe → refresh).
+    func needsRefresh(buffer: TimeInterval = 5 * 60) -> Bool {
+        guard let expiresAt = claudeAiOauth.expiresAt else { return true }
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        return nowMs + buffer * 1000 >= expiresAt
+    }
 }

@@ -21,9 +21,7 @@ final class AppViewModel {
     private let usageService = UsageService()
     private let sessionService = SessionService()
     private let historyService = UsageHistoryService()
-    private let otelReceiver = OTelReceiver()
     let bridge = BridgeCoordinator()
-    var otelConnected = false
     var extraUsageEnabled = false
     var extraUsageUtilization: Double = 0
     var extraUsageUsedDollars: Double = 0
@@ -69,15 +67,6 @@ final class AppViewModel {
             Task { @MainActor in await self.refresh() }
         }
 
-        Task {
-            do {
-                try await otelReceiver.start()
-                otelConnected = true
-            } catch {
-                otelConnected = false
-            }
-        }
-
         Task { await bridge.start() }
     }
 
@@ -86,7 +75,6 @@ final class AppViewModel {
         pollTimer = nil
         if let activity { Foundation.ProcessInfo.processInfo.endActivity(activity) }
         activity = nil
-        Task { await otelReceiver.stop() }
         Task { await bridge.stop() }
     }
 

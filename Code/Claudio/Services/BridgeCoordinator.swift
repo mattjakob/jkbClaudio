@@ -25,6 +25,9 @@ final class BridgeCoordinator {
     private var pendingRouteMessage: String?
     private var pendingQuestions: [String: PendingQuestion] = [:]
     private var pendingIdleAsks: [String: PendingIdleAsk] = [:]
+    private var pendingQuestionExpiries: [String: Task<Void, Never>] = [:]
+    private var pendingIdleExpiries: [String: Task<Void, Never>] = [:]
+    private static let pendingTTL: Duration = .seconds(120)
     private var idleAskCounter = 0
     private var lastIdleAskKey: String?
 
@@ -217,10 +220,12 @@ final class BridgeCoordinator {
         isConnected = hookStarted
         if hookStarted { lastBridgeError = nil }
 
-        // Re-sync hooks on startup to pick up any code changes
+        // Re-sync hooks on startup to pick up any code changes.
+        // Don't reset/prompt Accessibility here — that nags the user on every
+        // launch. The settings UI surfaces the missing permission instead.
         if checkHooksInstalled() {
             syncHooks()
-            ensureAccessibility()
+            checkAccessibility()
         }
     }
 
@@ -229,9 +234,9 @@ final class BridgeCoordinator {
         accessibilityGranted = AXIsProcessTrusted()
     }
 
-    /// Prompts the user to grant Accessibility permission via notification.
+    /// User-initiated: reset the (potentially stale, post-rebuild) Accessibility
+    /// entry and prompt for re-grant. Triggered from the settings UI.
     func promptAccessibility() {
-        // Reset stale entry (signature changed after rebuild)
         if !AXIsProcessTrusted(), let bundleId = Bundle.main.bundleIdentifier {
             let reset = Process()
             reset.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
@@ -241,18 +246,8 @@ final class BridgeCoordinator {
             try? reset.run()
             reset.waitUntilExit()
         }
-
         NotificationService.shared.sendAccessibilityRequired()
         checkAccessibility()
-    }
-
-    /// If Accessibility isn't trusted, send a notification instead of showing a dialog.
-    private func ensureAccessibility() {
-        guard !AXIsProcessTrusted() else {
-            accessibilityGranted = true
-            return
-        }
-        promptAccessibility()
     }
 
     func stop() async {
@@ -396,14 +391,17 @@ final class BridgeCoordinator {
             await telegram.send("\(tag)\n<pre>\(escapeHTML(body))</pre>")
 
         case "Stop":
+            guard isFilterEnabled(.agentFinished) else { return }
             let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{1FAD6}")
             await telegram.send(tag)
 
         case "SessionStart":
+            guard isFilterEnabled(.sessions) else { return }
             let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{2615}\u{FE0F}")
             await telegram.send(tag)
 
         case "SessionEnd":
+            guard isFilterEnabled(.sessions) else { return }
             let tag = slotTag(from: event.cwd, transcriptPath: event.transcriptPath, emoji: "\u{1F36D}")
             await telegram.send(tag)
 
@@ -430,12 +428,13 @@ final class BridgeCoordinator {
             return
         }
 
-        // Store for callback resolution
+        // Store for callback resolution, with TTL so it can't leak forever.
         pendingQuestions[permissionId] = PendingQuestion(
             permissionId: permissionId,
             questions: questionsRaw,
             originalInput: event.toolInput ?? [:]
         )
+        schedulePendingQuestionExpiry(permissionId)
 
         // For each question, send a message with inline keyboard options
         for (qIdx, question) in questionsRaw.enumerated() {
@@ -872,6 +871,7 @@ final class BridgeCoordinator {
         // For single-question flows, resolve immediately
         // For multi-question, we'd need to track partial answers — keep it simple for now
         pendingQuestions.removeValue(forKey: permId)
+        pendingQuestionExpiries.removeValue(forKey: permId)?.cancel()
         let response = HookPermissionResponse.allowWithInput(
             updatedInput.reduce(into: [:]) { $0[$1.key] = $1.value }
         )
@@ -932,6 +932,7 @@ final class BridgeCoordinator {
             idleAskCounter += 1
             let askId = String(idleAskCounter)
             pendingIdleAsks[askId] = PendingIdleAsk(pid: slot.pid, optionCount: options.count)
+            schedulePendingIdleExpiry(askId)
 
             var buttons: [TGInlineKeyboardButton] = []
             for (oIdx, option) in options.enumerated() {
@@ -968,6 +969,7 @@ final class BridgeCoordinator {
 
         let askId = components[1]
         pendingIdleAsks.removeValue(forKey: askId)
+        pendingIdleExpiries.removeValue(forKey: askId)?.cancel()
 
         // Inject 1-based option number into terminal
         let optionNumber = String(oIdx + 1)
@@ -1203,6 +1205,36 @@ final class BridgeCoordinator {
                 hooks[event] = entries
             }
         }
+    }
+
+    // MARK: - Pending state TTLs
+
+    private func schedulePendingQuestionExpiry(_ permId: String) {
+        pendingQuestionExpiries[permId]?.cancel()
+        pendingQuestionExpiries[permId] = Task { [weak self] in
+            try? await Task.sleep(for: Self.pendingTTL)
+            if Task.isCancelled { return }
+            self?.expirePendingQuestion(permId)
+        }
+    }
+
+    private func expirePendingQuestion(_ permId: String) {
+        pendingQuestions.removeValue(forKey: permId)
+        pendingQuestionExpiries.removeValue(forKey: permId)
+    }
+
+    private func schedulePendingIdleExpiry(_ askId: String) {
+        pendingIdleExpiries[askId]?.cancel()
+        pendingIdleExpiries[askId] = Task { [weak self] in
+            try? await Task.sleep(for: Self.pendingTTL)
+            if Task.isCancelled { return }
+            self?.expirePendingIdle(askId)
+        }
+    }
+
+    private func expirePendingIdle(_ askId: String) {
+        pendingIdleAsks.removeValue(forKey: askId)
+        pendingIdleExpiries.removeValue(forKey: askId)
     }
 
     // MARK: - Helpers

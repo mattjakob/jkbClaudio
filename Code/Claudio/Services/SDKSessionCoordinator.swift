@@ -48,8 +48,11 @@ actor SDKSessionCoordinator {
     }
 
     func sendUserMessage(_ text: String, sessionId: String) async {
-        guard let session = sessions[sessionId],
-              let data = SDKOutbound.userMessage(text) else { return }
+        guard let session = sessions[sessionId] else { return }
+        // Use the CLI's actual session ID (from the initial `system` message)
+        // when available — falls back to "default" for the very first turn.
+        let claudeSessionId = await session.process.sessionId ?? "default"
+        guard let data = SDKOutbound.userMessage(text, sessionId: claudeSessionId) else { return }
         await session.process.write(data)
     }
 
@@ -145,7 +148,9 @@ actor SDKSessionCoordinator {
         }
 
         let toolName = payload["tool_name"] as? String ?? "Unknown"
-        let toolInput = payload["tool_input"] as? [String: Any] ?? [:]
+        // Per the SDK control protocol, the inbound payload uses `input`,
+        // not `tool_input`.
+        let toolInput = payload["input"] as? [String: Any] ?? [:]
 
         let permId = "sdk_\(nextPermId)"
         nextPermId += 1
