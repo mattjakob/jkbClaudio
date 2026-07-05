@@ -38,6 +38,14 @@ import Foundation
         #expect(parsed!.dedupKey.hasPrefix("line|"))
     }
 
+    @Test func syntheticModelLinesIgnored() {
+        let line = """
+        {"type":"assistant","timestamp":"2026-07-05T10:00:00Z","requestId":"r1",\
+        "message":{"id":"m1","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+        """
+        #expect(TokenLineParser.parse(Data(line.utf8), calendar: .current) == nil)
+    }
+
     @Test func countsAddAndTotal() {
         var a = TokenCounts(input: 1, output: 2, cacheCreate: 3, cacheRead: 4)
         a.add(TokenCounts(input: 10, output: 20, cacheCreate: 30, cacheRead: 40))

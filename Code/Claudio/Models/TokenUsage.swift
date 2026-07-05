@@ -83,6 +83,10 @@ enum TokenLineParser {
             ?? ISO8601DateFormatter.standard.date(from: timestamp)
         guard let date else { return nil }
 
+        // Claude Code emits synthetic assistant lines (model "<synthetic>")
+        // with zero usage; they are not API calls.
+        guard model != "<synthetic>" else { return nil }
+
         // Streaming chunks of one API call share message.id + requestId;
         // the caller overwrites by key so the final cumulative chunk wins.
         let dedupKey: String
