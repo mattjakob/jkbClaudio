@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -33,16 +34,23 @@ final class KeychainService: Sendable {
     static let shared = KeychainService()
 
     private static let sourceService = "Claude Code-credentials"
-    private static let mirrorPath: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claude/widget-credentials.json"
-    }()
-    private static let credentialsFilePath: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/.claude/.credentials.json"
-    }()
+
+    private let mirrorPath: String
+    private let credentialsFilePath: String
+    /// Prompt-free keychain byte reader. Injectable for tests; the default
+    /// performs a silent (no-UI) SecItemCopyMatching.
+    private let keychainReader: @Sendable () -> Data?
 
     private let cache = ManagedCache()
+
+    init(credentialsFileOverride: String? = nil,
+         keychainReader: (@Sendable () -> Data?)? = nil) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        self.credentialsFilePath = credentialsFileOverride ?? "\(home)/.claude/.credentials.json"
+        self.mirrorPath = (credentialsFileOverride.map { $0 + ".mirror" })
+            ?? "\(home)/.claude/widget-credentials.json"
+        self.keychainReader = keychainReader ?? Self.silentKeychainBytes
+    }
 
     private final class ManagedCache: @unchecked Sendable {
         private var credentials: OAuthCredentials?
@@ -71,10 +79,10 @@ final class KeychainService: Sendable {
     /// prompt) only if no other source is available — first-launch case.
     func getCredentials() throws -> OAuthCredentials {
         if let cached = cache.get() { return cached }
-        if let creds = readJSONFile(at: Self.mirrorPath) {
+        if let creds = readJSONFile(at: mirrorPath) {
             cache.set(creds); return creds
         }
-        if let creds = readJSONFile(at: Self.credentialsFilePath) {
+        if let creds = readJSONFile(at: credentialsFilePath) {
             cache.set(creds)
             // Persist to our mirror so subsequent reads stay consistent.
             if let data = try? JSONEncoder().encode(creds) { saveMirror(data) }
@@ -106,7 +114,7 @@ final class KeychainService: Sendable {
     func recoverFromKeychain() -> OAuthCredentials? {
         cache.clear()
         // Try the credentials file once more in case Claude Code re-authed.
-        if let creds = readJSONFile(at: Self.credentialsFilePath) {
+        if let creds = readJSONFile(at: credentialsFilePath) {
             if let data = try? JSONEncoder().encode(creds) { saveMirror(data) }
             cache.set(creds)
             return creds
@@ -139,18 +147,55 @@ final class KeychainService: Sendable {
 
     /// Silent read — fails (without prompting) if the ACL forbids us.
     private func readKeychainSilent() throws -> OAuthCredentials {
+        guard let data = Self.silentKeychainBytes() else { throw KeychainError.itemNotFound }
+        return try decodeAndCache(data)
+    }
+
+    /// Prompt-free raw read of Claude Code's keychain item. Returns nil on
+    /// any failure (including ACL-denied) without ever showing UI.
+    private static func silentKeychainBytes() -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.sourceService,
+            kSecAttrService as String: sourceService,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUISkip
         ]
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else { throw KeychainError.itemNotFound }
-        guard let data = result as? Data else { throw KeychainError.unexpectedData }
-        return try decodeAndCache(data)
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+        return result as? Data
+    }
+
+    // MARK: - External change detection
+
+    /// SHA-256 over the raw bytes of Claude Code's credentials file and its
+    /// keychain item (silent read only — never prompts). Changes whenever
+    /// Claude Code refreshes or the user re-authenticates.
+    func externalFingerprint() -> String {
+        var hasher = SHA256()
+        hasher.update(data: FileManager.default.contents(atPath: credentialsFilePath) ?? Data())
+        hasher.update(data: Data([0]))
+        hasher.update(data: keychainReader() ?? Data())
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Re-reads Claude Code's own sources (credentials file, then silent
+    /// keychain) and adopts the result into cache + mirror. Never prompts.
+    /// Returns nil when neither source is readable.
+    @discardableResult
+    func reloadFromExternalSources() -> OAuthCredentials? {
+        if let creds = readJSONFile(at: credentialsFilePath) {
+            if let data = try? JSONEncoder().encode(creds) { saveMirror(data) }
+            cache.set(creds)
+            return creds
+        }
+        if let data = keychainReader(),
+           let creds = try? JSONDecoder().decode(OAuthCredentials.self, from: data) {
+            saveMirror(data)
+            cache.set(creds)
+            return creds
+        }
+        return nil
     }
 
     /// Reads via `/usr/bin/security`. Generally won't prompt because the user
@@ -198,8 +243,8 @@ final class KeychainService: Sendable {
     }
 
     private func saveMirror(_ data: Data) {
-        let url = URL(fileURLWithPath: Self.mirrorPath)
+        let url = URL(fileURLWithPath: mirrorPath)
         try? data.write(to: url, options: .atomic)
-        chmod(Self.mirrorPath, 0o600)
+        chmod(mirrorPath, 0o600)
     }
 }
