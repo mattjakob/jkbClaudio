@@ -4,27 +4,33 @@ enum UsageError: Error, LocalizedError {
     case rateLimited
     case serverError(Int)
     case authExpired
+    /// Fetch skipped by a gate (backoff/rate-limit window). Not shown as an
+    /// error — the UI keeps the previous snapshot.
+    case backoff(until: Date?)
 
     var errorDescription: String? {
         switch self {
         case .rateLimited: nil
         case .serverError(let code): "Usage API returned \(code)"
         case .authExpired: "Session expired — relaunch Claude Code to re-authenticate"
+        case .backoff: nil
         }
     }
 }
 
 /// Polls the Anthropic OAuth usage endpoint.
 ///
-/// Auth strategy (designed to NEVER prompt the keychain unless absolutely
-/// necessary):
-///  - Normal path: read access token from KeychainService cache/mirror.
-///  - Proactive: if `expiresAt` shows the token is within 5 min of expiring,
-///    refresh BEFORE making the request — avoids the 401 round-trip entirely.
-///  - On 401: refresh via OAuth using our cached refresh_token. No keychain.
-///  - On refresh failure: as a last resort, recover from keychain (which may
-///    prompt). Happens only when our refresh_token has been invalidated
-///    externally (e.g., user re-authed via Claude Code on another machine).
+/// Auth strategy (designed to never prompt the keychain and never rotate
+/// Claude Code's refresh token on the normal path):
+///  1. Cached credentials still valid -> use them.
+///  2. Piggyback: Claude Code refreshed externally -> adopt its token
+///     (fingerprint change on credentials file / keychain item).
+///  3. Delegate: `claude` CLI PTY probe refreshes for us, keeping refresh
+///     token ownership with Claude Code.
+///  4. Last resort: direct OAuth refresh with our mirror's refresh token.
+/// All refresh attempts run behind persisted RefreshGates (invalid_grant
+/// blocks until credentials change; transient failures back off; 429
+/// honors Retry-After).
 actor UsageService {
     private let apiURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
     /// Per the official Claude Code SDK, the canonical refresh endpoint is
@@ -41,29 +47,72 @@ actor UsageService {
         return URLSession(configuration: config)
     }()
 
-    func fetchUsage() async throws -> UsageResponse {
-        let token = try await currentAccessToken()
-        return try await request(with: token, hasRefreshed: false)
-    }
+    private let gates = RefreshGates()
+    private let delegatedRefresh = ClaudeDelegatedRefresh()
+    private var userAgent: String?
 
-    /// Returns a non-expired access token. Refreshes proactively if needed.
-    private func currentAccessToken() async throws -> String {
-        let creds = try KeychainService.shared.getCredentials()
-        if creds.needsRefresh() {
-            if let token = try? await refresh(using: creds.claudeAiOauth.refreshToken) {
-                return token
-            }
-            // Proactive refresh failed — fall through and let the request hit
-            // 401 so the recovery path runs.
+    func fetchUsage(userInitiated: Bool = false) async throws -> UsageResponse {
+        if !userInitiated, let until = gates.rateLimitedUntil() {
+            throw UsageError.backoff(until: until)
         }
-        return creds.claudeAiOauth.accessToken
+        let token = try await currentAccessToken(userInitiated: userInitiated)
+        return try await request(with: token, hasRefreshed: false, userInitiated: userInitiated)
     }
 
-    private func request(with token: String, hasRefreshed: Bool) async throws -> UsageResponse {
+    /// Returns a non-expired access token per the piggyback -> delegate ->
+    /// direct order documented on the actor.
+    private func currentAccessToken(userInitiated: Bool) async throws -> String {
+        let creds = try KeychainService.shared.getCredentials()
+        guard creds.needsRefresh() else { return creds.claudeAiOauth.accessToken }
+
+        // 1. Piggyback on an external refresh (common case: Claude Code
+        //    is in active use and refreshes its own token).
+        if let fresh = KeychainService.shared.reloadFromExternalSources(),
+           !fresh.needsRefresh() {
+            gates.clearFailures()
+            return fresh.claudeAiOauth.accessToken
+        }
+
+        let fingerprint = KeychainService.shared.externalFingerprint()
+        if gates.isAuthBlocked(currentFingerprint: fingerprint) {
+            throw UsageError.authExpired
+        }
+        if !userInitiated, let until = gates.transientBlockedUntil() {
+            throw UsageError.backoff(until: until)
+        }
+
+        // 2. Delegate the refresh to the claude CLI (keeps ownership of the
+        //    refresh token with Claude Code).
+        if await delegatedRefresh.attempt(fingerprint: {
+            KeychainService.shared.externalFingerprint()
+        }) {
+            if let fresh = KeychainService.shared.reloadFromExternalSources(),
+               !fresh.needsRefresh() {
+                gates.clearFailures()
+                return fresh.claudeAiOauth.accessToken
+            }
+        }
+
+        // 3. Last resort: direct refresh against our mirror's refresh token.
+        do {
+            let token = try await refresh(using: creds.claudeAiOauth.refreshToken)
+            gates.clearFailures()
+            return token
+        } catch UsageError.authExpired {
+            gates.recordAuthFailure(fingerprint: fingerprint)
+            throw UsageError.authExpired
+        } catch {
+            gates.recordTransientFailure()
+            throw error
+        }
+    }
+
+    private func request(with token: String, hasRefreshed: Bool,
+                         userInitiated: Bool) async throws -> UsageResponse {
         var req = URLRequest(url: apiURL)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        req.setValue("Claudio/1.0", forHTTPHeaderField: "User-Agent")
+        req.setValue(await resolvedUserAgent(), forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await session.data(for: req)
 
@@ -73,14 +122,18 @@ actor UsageService {
 
         switch http.statusCode {
         case 200:
+            gates.clearRateLimit()
             return try JSONDecoder().decode(UsageResponse.self, from: data)
 
         case 401:
             guard !hasRefreshed else { throw UsageError.authExpired }
-            let newToken = try await acquireFreshToken(stale: token)
-            return try await request(with: newToken, hasRefreshed: true)
+            let newToken = try await recoverToken(stale: token)
+            return try await request(with: newToken, hasRefreshed: true,
+                                     userInitiated: userInitiated)
 
         case 429:
+            gates.recordRateLimit(retryAfterHeader:
+                http.value(forHTTPHeaderField: "Retry-After"))
             throw UsageError.rateLimited
 
         default:
@@ -88,15 +141,24 @@ actor UsageService {
         }
     }
 
-    /// Tries our cached refresh_token first (silent). Falls back to keychain
-    /// recovery only if our refresh fails (rare — happens when Claude Code
-    /// rotated tokens and invalidated ours).
-    private func acquireFreshToken(stale: String) async throws -> String {
+    /// 401 with a token we thought was valid: external sources first, then
+    /// delegation, then direct refresh, then keychain recovery (may prompt,
+    /// existing last-resort behavior).
+    private func recoverToken(stale: String) async throws -> String {
+        if let fresh = KeychainService.shared.reloadFromExternalSources(),
+           fresh.claudeAiOauth.accessToken != stale {
+            return fresh.claudeAiOauth.accessToken
+        }
+        if await delegatedRefresh.attempt(fingerprint: {
+            KeychainService.shared.externalFingerprint()
+        }), let fresh = KeychainService.shared.reloadFromExternalSources(),
+           fresh.claudeAiOauth.accessToken != stale {
+            return fresh.claudeAiOauth.accessToken
+        }
         if let token = try? await refreshWithCachedRefreshToken() {
+            gates.clearFailures()
             return token
         }
-
-        // Our refresh failed. Last resort: re-read the keychain.
         guard let recovered = KeychainService.shared.recoverFromKeychain() else {
             throw UsageError.authExpired
         }
@@ -105,6 +167,14 @@ actor UsageService {
         // Keychain returned the same stale token — try refreshing with the
         // recovered refresh_token (might be newer than ours).
         return try await refresh(using: recovered.claudeAiOauth.refreshToken)
+    }
+
+    private func resolvedUserAgent() async -> String {
+        if let userAgent { return userAgent }
+        let version = await ClaudeCLI.detectVersion() ?? "2.1.0"
+        let ua = "claude-code/\(version)"
+        userAgent = ua
+        return ua
     }
 
     private func refreshWithCachedRefreshToken() async throws -> String {
@@ -123,8 +193,16 @@ actor UsageService {
         ])
 
         let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw UsageError.authExpired
+        guard let http = response as? HTTPURLResponse else {
+            throw UsageError.serverError(0)
+        }
+        guard http.statusCode == 200 else {
+            struct OAuthErrorBody: Decodable { let error: String? }
+            let body = try? JSONDecoder().decode(OAuthErrorBody.self, from: data)
+            if body?.error == "invalid_grant" {
+                throw UsageError.authExpired
+            }
+            throw UsageError.serverError(http.statusCode)
         }
 
         struct RefreshResponse: Decodable {
