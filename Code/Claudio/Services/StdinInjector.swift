@@ -272,7 +272,11 @@ enum StdinInjector {
     }
 
     private static func focusTerminalApp(ttyPath: String) async -> InjectionResult {
-        // Try Terminal.app first
+        // Targeting Terminal.app via AppleScript launches it (opening an
+        // empty window) when it isn't running — only proceed if it is.
+        guard await isAppRunning("Terminal") else {
+            return .failed("Terminal.app not running")
+        }
         let script = """
             tell application "Terminal"
                 repeat with w in windows

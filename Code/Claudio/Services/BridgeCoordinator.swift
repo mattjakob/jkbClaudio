@@ -771,6 +771,9 @@ final class BridgeCoordinator {
     }
 
     private func handleCallback(_ callback: TGCallbackQuery) async {
+        // Only accept callbacks from buttons in the bound chat — callbacks
+        // can approve permission prompts and inject keystrokes.
+        guard chatId != 0, callback.message?.chat.id == chatId else { return }
         guard let data = callback.data else { return }
 
         // SDK spawned session callbacks
@@ -986,10 +989,28 @@ final class BridgeCoordinator {
         }
     }
 
+    /// Only transcript files under `~/.claude` (or `$CLAUDE_CONFIG_DIR`) with a
+    /// `.jsonl` extension are readable. A hook event carries a caller-supplied
+    /// `transcript_path`; this stops it from being pointed at arbitrary files
+    /// (e.g. `/etc/passwd`) or blocking FIFOs/devices.
+    private static func isTranscriptPathAllowed(_ path: String) -> Bool {
+        let resolved = URL(fileURLWithPath: path).standardizedFileURL.path
+        guard resolved.hasSuffix(".jsonl") else { return false }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var roots = ["\(home)/.claude/"]
+        if let configDir = Foundation.ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
+           !configDir.isEmpty {
+            let base = configDir.hasSuffix("/") ? configDir : configDir + "/"
+            roots.append(base)
+        }
+        return roots.contains { resolved.hasPrefix($0) }
+    }
+
     /// Read the last 16KB of a JSONL transcript and find the last actionable tool_use block
     /// (AskUserQuestion or ExitPlanMode).
     private func extractAskFromTranscript(_ path: String) -> [[String: Any]]? {
-        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        guard Self.isTranscriptPathAllowed(path),
+              let fh = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? fh.close() }
 
         let fileSize = fh.seekToEndOfFile()
@@ -1060,7 +1081,9 @@ final class BridgeCoordinator {
         stripOurHooks(&hooks)
 
         // Re-add only hooks for enabled filters (all HTTP type)
-        let baseURL = "http://localhost:\(Self.hookPort)"
+        // 127.0.0.1 (not "localhost") so the URL matches the server's IPv4
+        // loopback bind — "localhost" can resolve to ::1 first and miss it.
+        let baseURL = "http://127.0.0.1:\(Self.hookPort)"
         for (event, path, timeout) in Self.hookEvents {
             guard isHookNeeded(event) else { continue }
             var hookDef: [String: Any] = ["type": "http", "url": "\(baseURL)\(path)"]
@@ -1116,8 +1139,14 @@ final class BridgeCoordinator {
     }
 
     /// Run a harmless Terminal.app AppleScript to trigger the Automation permission dialog.
+    /// Skipped when Terminal.app isn't running — targeting it via AppleScript
+    /// would launch it (popping an empty window). The permission dialog then
+    /// appears on first real use instead.
     private func triggerAutomationPermission() async -> Bool {
         await MainActor.run {
+            guard NSWorkspace.shared.runningApplications.contains(where: {
+                $0.bundleIdentifier == "com.apple.Terminal"
+            }) else { return false }
             var errorInfo: NSDictionary?
             let script = NSAppleScript(source: """
                 tell application "Terminal" to return name
@@ -1183,8 +1212,11 @@ final class BridgeCoordinator {
     /// Returns true if a hook definition belongs to Claudio (matches our port in url or command).
     private static func isOurHookDef(_ def: [String: Any]) -> Bool {
         let port = String(hookPort)
-        if let url = def["url"] as? String, url.contains("localhost:\(port)") { return true }
-        if let cmd = def["command"] as? String, cmd.contains("localhost:\(port)") { return true }
+        // Match both hosts so legacy "localhost" entries are recognized and
+        // migrated to 127.0.0.1 on the next sync.
+        let needles = ["localhost:\(port)", "127.0.0.1:\(port)"]
+        if let url = def["url"] as? String, needles.contains(where: url.contains) { return true }
+        if let cmd = def["command"] as? String, needles.contains(where: cmd.contains) { return true }
         return false
     }
 
