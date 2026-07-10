@@ -26,10 +26,13 @@ enum KeychainError: Error, LocalizedError {
 ///   3. Claude Code's own credentials file — `~/.claude/.credentials.json`.
 ///      Some installs (Linux, certain macOS configs) put credentials here
 ///      instead of the keychain. No prompt.
-///   4. Claude Code's keychain item — last resort. May prompt.
+///   4. Claude Code's keychain item — last resort. Read silently (no dialog)
+///      unless the caller explicitly allows a prompt on a user-initiated flow.
 ///
 /// Token refresh is owned by `UsageService`; new tokens get written back here
 /// via `updateMirror(with:)` so the keychain stays untouched on the hot path.
+/// Nothing here shells out to `/usr/bin/security` — that binary prompts with
+/// its own code identity and was the source of recurring password dialogs.
 final class KeychainService: Sendable {
     static let shared = KeychainService()
 
@@ -75,9 +78,10 @@ final class KeychainService: Sendable {
     // MARK: - Read
 
     /// Returns credentials from cache, mirror, or Claude Code's own credentials
-    /// file without ever prompting. Falls back to the keychain (which may
-    /// prompt) only if no other source is available — first-launch case.
-    func getCredentials() throws -> OAuthCredentials {
+    /// file without ever prompting. The keychain is the last resort: it is
+    /// read silently (no dialog) unless `allowPrompt` is set, which callers do
+    /// only on user-initiated flows so background polling never shows UI.
+    func getCredentials(allowPrompt: Bool = false) throws -> OAuthCredentials {
         if let cached = cache.get() { return cached }
         if let creds = readJSONFile(at: mirrorPath) {
             cache.set(creds); return creds
@@ -88,7 +92,8 @@ final class KeychainService: Sendable {
             if let data = try? JSONEncoder().encode(creds) { saveMirror(data) }
             return creds
         }
-        return try readKeychainPrompting()
+        if allowPrompt { return try readKeychainPrompting() }
+        return try readKeychainSilent()
     }
 
     func getAccessToken() throws -> String {
@@ -108,10 +113,13 @@ final class KeychainService: Sendable {
         }
     }
 
-    /// LAST resort recovery: re-read from Claude Code's keychain. May prompt
-    /// the user if the ACL has been reset by a Claude Code token rotation.
-    /// Used only when our own OAuth refresh has failed.
-    func recoverFromKeychain() -> OAuthCredentials? {
+    /// LAST resort recovery: re-read from Claude Code's credentials file, then
+    /// the keychain. The keychain is read silently unless `allowPrompt` is set.
+    /// A prompt is only ever needed when Claude Code recreated its keychain
+    /// item (full re-login), which resets the ACL and defeats the silent read;
+    /// callers pass `allowPrompt` on user-initiated flows only, so this never
+    /// pops a dialog from background polling.
+    func recoverFromKeychain(allowPrompt: Bool = false) -> OAuthCredentials? {
         cache.clear()
         // Try the credentials file once more in case Claude Code re-authed.
         if let creds = readJSONFile(at: credentialsFilePath) {
@@ -120,7 +128,8 @@ final class KeychainService: Sendable {
             return creds
         }
         if let creds = try? readKeychainSilent() { return creds }
-        return readKeychainViaSecurityCLI()
+        if allowPrompt, let creds = try? readKeychainPrompting() { return creds }
+        return nil
     }
 
     // MARK: - Private
@@ -198,38 +207,6 @@ final class KeychainService: Sendable {
         return nil
     }
 
-    /// Reads via `/usr/bin/security`. Generally won't prompt because the user
-    /// has already authorized the binary against their login keychain, but
-    /// will prompt the FIRST time after Claude Code recreates the item.
-    /// 3-second hard timeout prevents hangs (observed on macOS 26.3+).
-    private func readKeychainViaSecurityCLI() -> OAuthCredentials? {
-        let pipe = Pipe()
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        proc.arguments = ["find-generic-password", "-s", Self.sourceService, "-w"]
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-
-        do { try proc.run() } catch { return nil }
-
-        let timeoutTask = DispatchWorkItem { [weak proc] in
-            guard let proc, proc.isRunning else { return }
-            proc.terminate()
-            // SIGKILL after 200ms if SIGTERM didn't take.
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
-                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-            }
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0, execute: timeoutTask)
-
-        proc.waitUntilExit()
-        timeoutTask.cancel()
-
-        guard proc.terminationStatus == 0 else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return try? decodeAndCache(data)
-    }
-
     @discardableResult
     private func decodeAndCache(_ data: Data) throws -> OAuthCredentials {
         do {
@@ -243,8 +220,19 @@ final class KeychainService: Sendable {
     }
 
     private func saveMirror(_ data: Data) {
-        let url = URL(fileURLWithPath: mirrorPath)
-        try? data.write(to: url, options: .atomic)
-        chmod(mirrorPath, 0o600)
+        // Create the temp with 0600 from the outset, then atomically rename it
+        // into place. `Data.write(.atomic)` would rename a temp created with
+        // umask-default perms over the destination, briefly exposing the token
+        // file as world/group-readable; rename(2) of a 0600 inode has no such
+        // window and is atomic on the same filesystem.
+        let fm = FileManager.default
+        let tmpPath = mirrorPath + ".tmp"
+        fm.createFile(atPath: tmpPath, contents: data,
+                      attributes: [.posixPermissions: 0o600])
+        if rename(tmpPath, mirrorPath) != 0 {
+            try? data.write(to: URL(fileURLWithPath: mirrorPath), options: [])
+            chmod(mirrorPath, 0o600)
+            try? fm.removeItem(atPath: tmpPath)
+        }
     }
 }

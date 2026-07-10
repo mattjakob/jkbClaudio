@@ -9,6 +9,9 @@ import Network
 actor HookServer {
     private static let port: UInt16 = 19876
     private static let permissionTimeout: Duration = .seconds(110)
+    /// Hard cap on a single request's bytes. Hook payloads are small JSON;
+    /// this stops a peer from streaming unbounded data into memory.
+    private static let maxRequestBytes = 1 << 20  // 1 MiB
 
     private var listener: NWListener?
     private var connections: [NWConnection] = []
@@ -33,7 +36,13 @@ actor HookServer {
         guard let nwPort = NWEndpoint.Port(rawValue: Self.port) else {
             throw URLError(.badURL)
         }
-        let newListener = try NWListener(using: .tcp, on: nwPort)
+        // Bind to IPv4 loopback only. Hook clients always POST to
+        // 127.0.0.1, so there is no reason to accept connections from other
+        // hosts — this keeps the port off the LAN entirely.
+        let params = NWParameters.tcp
+        params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: nwPort)
+        params.allowLocalEndpointReuse = true
+        let newListener = try NWListener(using: params)
         self.listener = newListener
 
         newListener.newConnectionHandler = { [weak self] conn in
@@ -93,6 +102,11 @@ actor HookServer {
 
             var buf = buffer
             if let data { buf.append(data) }
+
+            if buf.count > Self.maxRequestBytes {
+                connection.cancel()
+                return
+            }
 
             if Self.isRequestComplete(buf) || isComplete || error != nil {
                 Task { await self.processRequest(buf, connection: connection) }

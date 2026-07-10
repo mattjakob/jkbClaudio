@@ -62,7 +62,7 @@ actor UsageService {
     /// Returns a non-expired access token per the piggyback -> delegate ->
     /// direct order documented on the actor.
     private func currentAccessToken(userInitiated: Bool) async throws -> String {
-        let creds = try KeychainService.shared.getCredentials()
+        let creds = try KeychainService.shared.getCredentials(allowPrompt: userInitiated)
         guard creds.needsRefresh() else { return creds.claudeAiOauth.accessToken }
 
         // 1. Piggyback on an external refresh (common case: Claude Code
@@ -127,7 +127,7 @@ actor UsageService {
 
         case 401:
             guard !hasRefreshed else { throw UsageError.authExpired }
-            let newToken = try await recoverToken(stale: token)
+            let newToken = try await recoverToken(stale: token, userInitiated: userInitiated)
             return try await request(with: newToken, hasRefreshed: true,
                                      userInitiated: userInitiated)
 
@@ -142,9 +142,10 @@ actor UsageService {
     }
 
     /// 401 with a token we thought was valid: external sources first, then
-    /// delegation, then direct refresh, then keychain recovery (may prompt,
-    /// existing last-resort behavior).
-    private func recoverToken(stale: String) async throws -> String {
+    /// delegation, then direct refresh, then keychain recovery. The keychain
+    /// recovery only shows a dialog when `userInitiated` — background polling
+    /// stays silent and surfaces `authExpired` instead of nagging.
+    private func recoverToken(stale: String, userInitiated: Bool) async throws -> String {
         if let fresh = KeychainService.shared.reloadFromExternalSources(),
            fresh.claudeAiOauth.accessToken != stale {
             return fresh.claudeAiOauth.accessToken
@@ -159,7 +160,7 @@ actor UsageService {
             gates.clearFailures()
             return token
         }
-        guard let recovered = KeychainService.shared.recoverFromKeychain() else {
+        guard let recovered = KeychainService.shared.recoverFromKeychain(allowPrompt: userInitiated) else {
             throw UsageError.authExpired
         }
         let access = recovered.claudeAiOauth.accessToken
